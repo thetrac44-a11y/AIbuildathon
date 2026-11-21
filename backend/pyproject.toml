@@ -1,0 +1,10 @@
+[project]
+name = "hr-attendance-copilot-backend"
+version = "1.0.0"
+description = "HR Attendance Copilot Backend API (FastAPI + SQLite)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"

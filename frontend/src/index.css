@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-navy: #102A43;
+  --color-blue: #2563EB;
+  --color-teal: #0F9D9A;
+  --color-green: #15803D;
+  --color-amber: #B45309;
+  --color-red: #B91C1C;
+  --color-bg: #F4F7FB;
+  --color-border: #E4EAF2;
+}
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: var(--color-bg);
+  color: #0F172A;
+}
