@@ -16,10 +16,14 @@ import {
   Bell,
   ChevronLeft,
   ChevronRight,
+  LogOut,
+  CheckCircle2,
+  AlertCircle,
+  Info,
 } from 'lucide-react';
 import { getVisibleNavGroups, SITEMAP_SCREENS } from '../../config/navigation';
-import { AVAILABLE_PERIODS, useDevAuth } from '../../context/DevAuthContext';
-import { NavItem, UserRole } from '../../types/navigation';
+import { AVAILABLE_PERIODS, useAuth } from '../../context/AuthContext';
+import { NavItem } from '../../types/navigation';
 
 const iconMap: Record<NavItem['iconName'], React.ReactNode> = {
   LayoutDashboard: <LayoutDashboard className="w-4 h-4 shrink-0" />,
@@ -34,26 +38,21 @@ const iconMap: Record<NavItem['iconName'], React.ReactNode> = {
   ShieldCheck: <ShieldCheck className="w-4 h-4 shrink-0" />,
 };
 
-const roleLabelMap: Record<UserRole, string> = {
-  employee: 'Nhân viên (Employee)',
-  manager: 'Trưởng phòng (Manager)',
-  hr: 'Nhân sự (HR)',
-};
-
 export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { currentUser, setRole, selectedPeriod, setSelectedPeriod, isDevMockAuth } = useDevAuth();
+  const { user, logout, selectedPeriod, setSelectedPeriod, toasts, dismissToast } = useAuth();
   const location = useLocation();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
 
-  const visibleGroups = getVisibleNavGroups(currentUser.role);
+  if (!user) return null;
+
+  const visibleGroups = getVisibleNavGroups(user.role);
   const currentScreen = SITEMAP_SCREENS.find((s) => location.pathname.startsWith(s.path));
   const pageTitle = currentScreen?.title ?? 'Tổng quan';
   const showPeriodFilter = currentScreen?.syncPeriodFilter ?? true;
 
   const renderSidebarContent = (isMobile = false) => (
     <div className="flex flex-col h-full bg-brand-navy text-white">
-      {/* Brand header */}
       <div className="flex items-center justify-between px-4 py-4 border-b border-white/10">
         <div className="flex items-center gap-2.5 overflow-hidden">
           <div className="w-8 h-8 rounded-lg bg-brand-blue flex items-center justify-center font-bold text-sm shrink-0">
@@ -89,7 +88,6 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
         )}
       </div>
 
-      {/* Navigation groups */}
       <nav aria-label="Điều hướng chính" className="flex-1 overflow-y-auto px-3 py-4 space-y-5">
         {visibleGroups.map(({ group, items }) => (
           <div key={group}>
@@ -124,28 +122,34 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
         ))}
       </nav>
 
-      {/* Bottom user profile card */}
-      <div className="p-3 border-t border-white/10">
+      <div className="p-3 border-t border-white/10 space-y-2">
         <div className="flex items-center gap-2.5 rounded-xl bg-white/5 p-2.5">
           <div className="w-8 h-8 rounded-full bg-brand-blue/30 text-blue-200 flex items-center justify-center text-xs font-bold shrink-0">
-            {currentUser.employeeId.slice(-2)}
+            {user.employee_id.slice(-2)}
           </div>
           {(!sidebarCollapsed || isMobile) && (
             <div className="min-w-0 flex-1">
-              <p className="text-xs font-semibold text-white truncate">{currentUser.fullName}</p>
+              <p className="text-xs font-semibold text-white truncate">{user.full_name}</p>
               <p className="text-[11px] text-slate-300 truncate">
-                {currentUser.employeeId} · {currentUser.role.toUpperCase()}
+                {user.employee_id} · {user.role.toUpperCase()}
               </p>
             </div>
           )}
         </div>
+        <button
+          type="button"
+          onClick={logout}
+          className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-medium text-slate-300 hover:bg-white/10 hover:text-white transition-colors"
+        >
+          <LogOut className="w-3.5 h-3.5 shrink-0" />
+          {(!sidebarCollapsed || isMobile) && <span>Đăng xuất</span>}
+        </button>
       </div>
     </div>
   );
 
   return (
     <div className="min-h-screen flex bg-brand-bg text-slate-900">
-      {/* Desktop Sidebar */}
       <aside
         className={`hidden lg:block shrink-0 transition-all duration-200 ${
           sidebarCollapsed ? 'w-[76px]' : 'w-[256px]'
@@ -154,7 +158,6 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
         <div className="sticky top-0 h-screen">{renderSidebarContent(false)}</div>
       </aside>
 
-      {/* Mobile Drawer */}
       {mobileDrawerOpen && (
         <div className="fixed inset-0 z-40 lg:hidden flex">
           <div
@@ -165,32 +168,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
         </div>
       )}
 
-      {/* Main Content Wrapper */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Dev-only auth notice */}
-        {isDevMockAuth && (
-          <div className="bg-amber-50 border-b border-amber-200 px-4 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-amber-900">
-            <span>
-              <strong>Chế độ Development (Mock Auth Giai đoạn 1):</strong> Dùng để kiểm thử UI &
-              Sidebar 3 vai trò. Xác thực & phân quyền máy chủ thật sẽ thay thế ở Giai đoạn 3.
-            </span>
-            <label className="inline-flex items-center gap-2 font-medium">
-              <span>Đổi vai trò test:</span>
-              <select
-                aria-label="Chọn vai trò thử nghiệm"
-                value={currentUser.role}
-                onChange={(e) => setRole(e.target.value as UserRole)}
-                className="rounded-md border border-amber-300 bg-white px-2 py-0.5 text-xs font-semibold text-slate-800"
-              >
-                <option value="hr">{roleLabelMap.hr}</option>
-                <option value="manager">{roleLabelMap.manager}</option>
-                <option value="employee">{roleLabelMap.employee}</option>
-              </select>
-            </label>
-          </div>
-        )}
-
-        {/* Top Header */}
         <header className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-brand-border px-4 lg:px-7 py-3.5 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
             <button
@@ -206,11 +184,11 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               <p className="text-[11px] text-slate-500 truncate">
                 Phạm vi dữ liệu:{' '}
                 <strong className="text-slate-700">
-                  {currentUser.role === 'hr'
+                  {user.role === 'hr'
                     ? 'Toàn công ty'
-                    : currentUser.role === 'manager'
-                      ? `Phòng ${currentUser.departmentName}`
-                      : `Cá nhân (${currentUser.employeeId})`}
+                    : user.role === 'manager'
+                      ? `Phòng ${user.department_name}`
+                      : `Cá nhân (${user.employee_id})`}
                 </strong>
               </p>
             </div>
@@ -231,26 +209,56 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
                 ))}
               </select>
             )}
-            <button
-              type="button"
-              aria-label="Thông báo"
+            <Link
+              to="/anomalies"
+              aria-label="Cảnh báo bất thường"
               className="p-2 rounded-lg border border-brand-border bg-white text-slate-600 hover:bg-brand-bg relative"
             >
               <Bell className="w-4 h-4" />
-              <span className="w-2 h-2 rounded-full bg-brand-red absolute top-1.5 right-1.5" />
-            </button>
+            </Link>
             <Link
               to="/profile"
               className="w-8 h-8 rounded-full bg-brand-blue/15 text-brand-blue font-bold text-xs flex items-center justify-center hover:bg-brand-blue/25"
               title="Hồ sơ cá nhân"
             >
-              {currentUser.fullName.charAt(0)}
+              {user.full_name.charAt(0)}
             </Link>
           </div>
         </header>
 
-        {/* Main Content Area */}
         <main className="flex-1 p-4 lg:p-7 max-w-[1440px] w-full mx-auto">{children}</main>
+      </div>
+
+      {/* Toast Notifications */}
+      <div className="fixed bottom-4 right-4 z-50 space-y-2 max-w-sm w-full pointer-events-none">
+        {toasts.map((t) => (
+          <div
+            key={t.id}
+            className={`pointer-events-auto flex items-start gap-2.5 px-4 py-3 rounded-xl border shadow-lg text-xs font-medium bg-white ${
+              t.type === 'error'
+                ? 'border-red-200 text-brand-red'
+                : t.type === 'info'
+                  ? 'border-blue-200 text-brand-blue'
+                  : 'border-emerald-200 text-brand-green'
+            }`}
+          >
+            {t.type === 'error' ? (
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            ) : t.type === 'info' ? (
+              <Info className="w-4 h-4 shrink-0 mt-0.5" />
+            ) : (
+              <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+            )}
+            <span className="flex-1 text-slate-800">{t.text}</span>
+            <button
+              type="button"
+              onClick={() => dismissToast(t.id)}
+              className="text-slate-400 hover:text-slate-600"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        ))}
       </div>
     </div>
   );

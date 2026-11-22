@@ -2,7 +2,7 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { ShieldAlert } from 'lucide-react';
 import { canAccessScreen, SITEMAP_SCREENS } from '../../config/navigation';
-import { useDevAuth } from '../../context/DevAuthContext';
+import { useAuth } from '../../context/AuthContext';
 
 export interface RouteGuardProps {
   screenId: string;
@@ -10,10 +10,10 @@ export interface RouteGuardProps {
 }
 
 export const RouteGuard: React.FC<RouteGuardProps> = ({ screenId, children }) => {
-  const { currentUser } = useDevAuth();
+  const { user } = useAuth();
   const screen = SITEMAP_SCREENS.find((s) => s.id === screenId);
 
-  if (!screen || !canAccessScreen(currentUser.role, screen)) {
+  if (!user || !screen || !canAccessScreen(user.role, screen)) {
     return (
       <div className="rounded-card border border-red-200 bg-white p-8 text-center max-w-lg mx-auto my-8 shadow-sm">
         <div className="w-12 h-12 rounded-full bg-red-50 text-brand-red flex items-center justify-center mx-auto mb-3">
@@ -21,9 +21,9 @@ export const RouteGuard: React.FC<RouteGuardProps> = ({ screenId, children }) =>
         </div>
         <h2 className="text-base font-bold text-slate-900">403 – Không có quyền truy cập</h2>
         <p className="mt-2 text-xs text-slate-600 leading-relaxed">
-          Vai trò hiện tại (<strong>{currentUser.role.toUpperCase()}</strong>) không được phép truy
-          cập màn hình <strong>{screen?.title ?? screenId}</strong>. Lưu ý: quyền truy cập dữ liệu
-          cũng sẽ được cưỡng chế bắt buộc ở tầng Backend API và Database.
+          Vai trò hiện tại (<strong>{user?.role.toUpperCase() ?? 'CHƯA ĐĂNG NHẬP'}</strong>) không được phép truy
+          cập màn hình <strong>{screen?.title ?? screenId}</strong>. Quyền truy cập dữ liệu cũng được
+          kiểm tra bắt buộc ở tầng Backend API.
         </p>
         <div className="mt-5">
           <Link

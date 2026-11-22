@@ -7,6 +7,13 @@ export interface ColumnDef<T> {
   render?: (row: T) => React.ReactNode;
 }
 
+export interface DataTablePagination {
+  page: number;
+  pageSize: number;
+  totalCount: number;
+  onPageChange: (nextPage: number) => void;
+}
+
 export interface DataTableProps<T> {
   columns: ColumnDef<T>[];
   data: T[];
@@ -14,6 +21,7 @@ export interface DataTableProps<T> {
   emptyTitle?: string;
   emptyDescription?: string;
   onRowClick?: (row: T) => void;
+  pagination?: DataTablePagination;
 }
 
 export function DataTable<T>({
@@ -23,10 +31,17 @@ export function DataTable<T>({
   emptyTitle = 'Không có dữ liệu phù hợp',
   emptyDescription = 'Hãy thử thay đổi bộ lọc thời gian hoặc từ khóa tìm kiếm.',
   onRowClick,
+  pagination,
 }: DataTableProps<T>) {
   if (data.length === 0) {
     return <EmptyState title={emptyTitle} description={emptyDescription} />;
   }
+
+  const totalCount = pagination ? pagination.totalCount : data.length;
+  const totalPages = pagination
+    ? Math.max(1, Math.ceil(pagination.totalCount / Math.max(1, pagination.pageSize)))
+    : 1;
+  const showPagination = Boolean(pagination && totalPages > 1);
 
   return (
     <div className="rounded-card border border-brand-border bg-white overflow-hidden shadow-sm">
@@ -63,9 +78,35 @@ export function DataTable<T>({
           </tbody>
         </table>
       </div>
-      <div className="px-4 py-2.5 bg-slate-50/60 border-t border-brand-border flex items-center justify-between text-[11px] text-slate-500">
-        <span>Tổng số dòng: {data.length}</span>
-        <span>Trang 1 / 1</span>
+      <div className="px-4 py-2.5 bg-slate-50/60 border-t border-brand-border flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600">
+        <span>
+          {showPagination && pagination
+            ? `Hiển thị ${data.length} / ${totalCount} bản ghi`
+            : `Tổng số dòng: ${totalCount}`}
+        </span>
+        {showPagination && pagination && (
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-slate-700">
+              Trang {pagination.page} / {totalPages}
+            </span>
+            <button
+              type="button"
+              disabled={pagination.page <= 1}
+              onClick={() => pagination.onPageChange(pagination.page - 1)}
+              className="px-2.5 py-1 rounded-md border border-brand-border bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+            >
+              ← Trang trước
+            </button>
+            <button
+              type="button"
+              disabled={pagination.page >= totalPages}
+              onClick={() => pagination.onPageChange(pagination.page + 1)}
+              className="px-2.5 py-1 rounded-md border border-brand-border bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+            >
+              Trang sau →
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
