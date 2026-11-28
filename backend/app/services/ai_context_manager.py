@@ -146,8 +146,21 @@ def save_conversation_turn(
     conn.commit()
 
 
-def list_user_conversations(conn: Any, user_id: str, limit: int = 30) -> List[Dict[str, Any]]:
-    """Read-only list of conversations strictly for user_id (ZERO re-query, ZERO audit log written)."""
+def list_user_conversations(
+    conn: Any,
+    user_id: str,
+    limit: int = 20,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """Read-only paginated list of conversations strictly for user_id (ZERO re-query, ZERO audit log written)."""
+    safe_limit = max(1, min(int(limit), 100))
+    safe_offset = max(0, int(offset))
+    total_row = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM ai_conversations WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    total_count = int((total_row["cnt"] if total_row else 0) or 0)
+
     rows = conn.execute(
         """
         SELECT
@@ -159,11 +172,11 @@ def list_user_conversations(conn: Any, user_id: str, limit: int = 30) -> List[Di
         FROM ai_conversations c
         WHERE c.user_id = ?
         ORDER BY c.updated_at DESC, c.created_at DESC
-        LIMIT ?
+        LIMIT ? OFFSET ?
         """,
-        (user_id, max(1, min(int(limit), 100))),
+        (user_id, safe_limit, safe_offset),
     ).fetchall()
-    return [
+    items = [
         {
             "conversation_id": r["conversation_id"],
             "title": r["title"],
@@ -173,6 +186,44 @@ def list_user_conversations(conn: Any, user_id: str, limit: int = 30) -> List[Di
         }
         for r in rows
     ]
+    return {
+        "total": total_count,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "has_more": (safe_offset + len(items)) < total_count,
+        "items": items,
+    }
+
+
+def rename_user_conversation(conn: Any, user_id: str, conversation_id: str, new_title: str) -> Dict[str, Any]:
+    """Rename a conversation strictly owned by user_id (ZERO re-query, ZERO audit log noise)."""
+    clean_title = (new_title or "").strip()[:120]
+    if not clean_title:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Tiêu đề hội thoại không được để trống.",
+        )
+    conv = conn.execute(
+        "SELECT conversation_id FROM ai_conversations WHERE conversation_id = ? AND user_id = ? LIMIT 1",
+        (conversation_id, user_id),
+    ).fetchone()
+    if not conv:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Không tìm thấy phiên hội thoại hoặc bạn không có quyền chỉnh sửa.",
+        )
+    now = _now_str()
+    conn.execute(
+        "UPDATE ai_conversations SET title = ?, updated_at = ? WHERE conversation_id = ? AND user_id = ?",
+        (clean_title, now, conversation_id, user_id),
+    )
+    conn.commit()
+    return {
+        "status": "ok",
+        "conversation_id": conversation_id,
+        "title": clean_title,
+        "updated_at": now,
+    }
 
 
 def get_user_conversation_detail(conn: Any, user_id: str, conversation_id: str) -> Dict[str, Any]:

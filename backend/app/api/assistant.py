@@ -11,6 +11,7 @@ from app.services.ai_context_manager import (
     delete_user_conversation,
     get_user_conversation_detail,
     list_user_conversations,
+    rename_user_conversation,
 )
 
 router = APIRouter(prefix="/api/assistant", tags=["ai-assistant"])
@@ -20,6 +21,10 @@ class AskRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=1000)
     conversation_id: Optional[str] = Field(default=None, max_length=64)
     active_period: Optional[str] = Field(default=None, max_length=16)
+
+
+class RenameConversationRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=120)
 
 
 @router.post("/ask")
@@ -53,15 +58,15 @@ def list_suggestions(
 
 @router.get("/conversations")
 def list_my_conversations(
-    limit: int = Query(default=30, ge=1, le=100),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     current_user: AuthenticatedUser = Depends(
         require_permissions("ai.ask.self", "ai.ask.department", "ai.ask.all", "ai.strategy")
     ),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ) -> Dict[str, Any]:
-    """List saved AI conversation threads strictly for current_user (read-only; zero audit log created)."""
-    items = list_user_conversations(conn, current_user.user_id, limit=limit)
-    return {"total": len(items), "items": items}
+    """List saved AI conversation threads strictly for current_user with pagination (read-only; zero audit log)."""
+    return list_user_conversations(conn, current_user.user_id, limit=limit, offset=offset)
 
 
 @router.get("/conversations/{conversation_id}")
@@ -74,6 +79,19 @@ def get_my_conversation(
 ) -> Dict[str, Any]:
     """Load saved messages & responses of a conversation strictly owned by current_user (zero re-query / zero audit log)."""
     return get_user_conversation_detail(conn, current_user.user_id, conversation_id)
+
+
+@router.patch("/conversations/{conversation_id}")
+def rename_my_conversation(
+    conversation_id: str,
+    payload: RenameConversationRequest,
+    current_user: AuthenticatedUser = Depends(
+        require_permissions("ai.ask.self", "ai.ask.department", "ai.ask.all", "ai.strategy")
+    ),
+    conn: sqlite3.Connection = Depends(get_db_dependency),
+) -> Dict[str, Any]:
+    """Rename a saved conversation thread strictly owned by current_user."""
+    return rename_user_conversation(conn, current_user.user_id, conversation_id, payload.title)
 
 
 @router.delete("/conversations/{conversation_id}")

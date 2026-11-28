@@ -906,11 +906,16 @@ def test_p3_35_conversation_isolation_prevents_cross_user_read_append_delete(p3_
     hr_conv_id = hr_turn["conversation_id"]
     assert hr_conv_id
 
-    # Employee MUST NOT list, read, append to, or delete HR's conversation!
+    # Employee MUST NOT list, read, rename, append to, or delete HR's conversation!
     emp_list = client.get("/api/assistant/conversations", headers=emp).json()["items"]
     assert all(c["conversation_id"] != hr_conv_id for c in emp_list)
 
     assert client.get(f"/api/assistant/conversations/{hr_conv_id}", headers=emp).status_code == 404
+    assert client.patch(
+        f"/api/assistant/conversations/{hr_conv_id}",
+        headers=emp,
+        json={"title": "Hacked title"},
+    ).status_code == 404
     assert client.post(
         "/api/assistant/ask",
         headers=emp,
@@ -918,8 +923,16 @@ def test_p3_35_conversation_isolation_prevents_cross_user_read_append_delete(p3_
     ).status_code == 404
     assert client.delete(f"/api/assistant/conversations/{hr_conv_id}", headers=emp).status_code == 404
 
-    # HR CAN read and delete own conversation cleanly
+    # HR CAN read, rename, paginate, and delete own conversation cleanly
     assert client.get(f"/api/assistant/conversations/{hr_conv_id}", headers=hr).status_code == 200
+    ren = client.patch(
+        f"/api/assistant/conversations/{hr_conv_id}",
+        headers=hr,
+        json={"title": "Nhân sự Kỹ thuật Q4"},
+    )
+    assert ren.status_code == 200 and ren.json()["title"] == "Nhân sự Kỹ thuật Q4"
+    paged = client.get("/api/assistant/conversations?limit=1&offset=0", headers=hr).json()
+    assert paged["total"] == 1 and paged["has_more"] is False and paged["items"][0]["title"] == "Nhân sự Kỹ thuật Q4"
     assert client.delete(f"/api/assistant/conversations/{hr_conv_id}", headers=hr).status_code == 200
     assert client.get(f"/api/assistant/conversations/{hr_conv_id}", headers=hr).status_code == 404
 
