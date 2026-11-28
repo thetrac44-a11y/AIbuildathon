@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import sqlite3
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -16,10 +17,29 @@ from app.core.permissions import get_default_permissions_for_role
 from app.db.connection import get_connection, is_postgres_connection
 from app.schemas.common import RoleEnum
 
+logger = logging.getLogger(__name__)
 bearer_scheme = HTTPBearer(auto_error=False)
 
-# In-memory revoked token JTI store for server-side logout in MVP
+# Fast in-memory hot cache synchronized with persistent DB table `revoked_tokens`
 REVOKED_JTIS: set[str] = set()
+
+
+def _is_missing_table_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return (
+        "no such table" in msg
+        or "does not exist" in msg
+        or "undefinedtable" in msg
+        or exc.__class__.__name__.lower() == "undefinedtable"
+    )
+
+
+def begin_write_transaction(conn: Any) -> None:
+    """Acquire an atomic write transaction lock on SQLite (PostgreSQL uses row-level FOR UPDATE)."""
+    if is_postgres_connection(conn):
+        return
+    if not getattr(conn, "in_transaction", False):
+        conn.execute("BEGIN IMMEDIATE")
 
 
 class AuthenticatedUser(BaseModel):
@@ -41,6 +61,7 @@ class AuthenticatedUser(BaseModel):
     must_change_password: bool = False
     permissions: List[str] = Field(default_factory=list)
     token_jti: Optional[str] = None
+    token_exp: Optional[int] = None
 
     def has_permission(self, permission_code: str) -> bool:
         return permission_code in self.permissions
@@ -78,9 +99,73 @@ def create_access_token(user_id: str, employee_id: str) -> Tuple[str, str, int]:
     return token, jti, settings.jwt_expire_minutes * 60
 
 
-def revoke_token(jti: Optional[str]) -> None:
-    if jti:
-        REVOKED_JTIS.add(jti)
+def revoke_token(
+    jti: Optional[str],
+    conn: Any = None,
+    user_id: Optional[str] = None,
+    expires_at: Optional[str] = None,
+) -> None:
+    """Revoke JWT by JTI in both memory cache and persistent DB `revoked_tokens` table."""
+    if not jti:
+        return
+    REVOKED_JTIS.add(jti)
+    if conn is None:
+        return
+    now_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        if is_postgres_connection(conn):
+            conn.execute(
+                """
+                INSERT INTO public.revoked_tokens (jti, user_id, expires_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT (jti) DO NOTHING
+                """,
+                (jti, user_id, expires_at),
+            )
+            conn.execute(
+                "DELETE FROM public.revoked_tokens WHERE expires_at IS NOT NULL AND expires_at < NOW()"
+            )
+        else:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO revoked_tokens (jti, user_id, expires_at)
+                VALUES (?, ?, ?)
+                """,
+                (jti, user_id, expires_at),
+            )
+            conn.execute(
+                "DELETE FROM revoked_tokens WHERE expires_at IS NOT NULL AND expires_at < ?",
+                (now_utc,),
+            )
+    except Exception as exc:
+        if _is_missing_table_error(exc):
+            if is_postgres_connection(conn):
+                conn.rollback()
+            logger.warning("revoked_tokens table not initialized yet; falling back to in-memory revocation.")
+            return
+        logger.exception("Failed to persist token revocation for jti=%s", jti)
+        raise
+
+
+def is_token_revoked(conn: Any, jti: Optional[str]) -> bool:
+    """Check whether a JWT JTI has been revoked (checks RAM cache first, then persistent DB)."""
+    if not jti:
+        return False
+    if jti in REVOKED_JTIS:
+        return True
+    try:
+        row = conn.execute("SELECT 1 FROM revoked_tokens WHERE jti = ?", (jti,)).fetchone()
+        if row is not None:
+            REVOKED_JTIS.add(jti)
+            return True
+        return False
+    except Exception as exc:
+        if _is_missing_table_error(exc):
+            if is_postgres_connection(conn):
+                conn.rollback()
+            return False
+        logger.exception("Failed checking revoked_tokens for jti=%s", jti)
+        raise
 
 
 def get_db_dependency():
@@ -93,26 +178,41 @@ def get_db_dependency():
 
 
 def load_user_permissions(conn: sqlite3.Connection, user_id: str, role_code: str) -> List[str]:
-    """Load effective permission codes from RBAC tables (live dynamic updates) with safe fallback to canonical defaults."""
+    """Load effective permission codes strictly from the user's authoritative role in RBAC tables.
+
+    Rules:
+    - Authoritative role comes from `employees.role` (`role_code`), NOT an OR-union with stale `user_roles`.
+    - When `roles` table is initialized and contains `role_code`, returns the exact mapped permissions
+      (including an empty list `[]` if an Admin intentionally revoked all permissions for that role).
+    - Only falls back to canonical defaults if the RBAC tables are missing or unseeded (0 role rows).
+    """
     try:
-        rows = conn.execute(
-            """
-            SELECT DISTINCT p.permission_code
-            FROM roles r
-            JOIN role_permissions rp ON rp.role_id = r.role_id
-            JOIN permissions p ON p.permission_id = rp.permission_id
-            WHERE r.role_code = ?
-               OR r.role_id IN (SELECT ur.role_id FROM user_roles ur WHERE ur.user_id = ?)
-            ORDER BY p.permission_code
-            """,
-            (role_code, user_id),
-        ).fetchall()
-        perms = [str(r["permission_code"]) for r in rows]
-        if perms:
-            return perms
-    except Exception:
-        pass
-    return sorted(get_default_permissions_for_role(role_code))
+        role_row = conn.execute(
+            "SELECT role_id FROM roles WHERE role_code = ?",
+            (role_code,),
+        ).fetchone()
+    except Exception as exc:
+        if _is_missing_table_error(exc):
+            if is_postgres_connection(conn):
+                conn.rollback()
+            return sorted(get_default_permissions_for_role(role_code))
+        logger.exception("Failed querying roles table for role_code=%s", role_code)
+        raise
+
+    if role_row is None:
+        return sorted(get_default_permissions_for_role(role_code))
+
+    rows = conn.execute(
+        """
+        SELECT DISTINCT p.permission_code
+        FROM role_permissions rp
+        JOIN permissions p ON p.permission_id = rp.permission_id
+        WHERE rp.role_id = ?
+        ORDER BY p.permission_code
+        """,
+        (role_row["role_id"],),
+    ).fetchall()
+    return [str(r["permission_code"]) for r in rows]
 
 
 def sync_user_role_mapping(
@@ -121,38 +221,46 @@ def sync_user_role_mapping(
     role_code: str,
     assigned_by_user_id: Optional[str] = None,
 ) -> None:
-    """Keep user_roles synchronized whenever an employee/account role is changed."""
+    """Keep user_roles synchronized 1:1 with employees.role whenever an employee/account role changes."""
     try:
         role_row = conn.execute("SELECT role_id FROM roles WHERE role_code = ?", (role_code,)).fetchone()
-        if not role_row:
+    except Exception as exc:
+        if _is_missing_table_error(exc):
+            if is_postgres_connection(conn):
+                conn.rollback()
             return
-        role_id = role_row["role_id"]
-        conn.execute("DELETE FROM user_roles WHERE user_id = ?", (user_id,))
-        if is_postgres_connection(conn):
-            conn.execute(
-                """
-                INSERT INTO public.user_roles (user_id, role_id, assigned_by_user_id)
-                VALUES (?, ?, ?)
-                ON CONFLICT (user_id, role_id) DO NOTHING
-                """,
-                (user_id, role_id, assigned_by_user_id),
-            )
-        else:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO user_roles (user_id, role_id, assigned_by_user_id)
-                VALUES (?, ?, ?)
-                """,
-                (user_id, role_id, assigned_by_user_id),
-            )
-    except Exception:
-        pass
+        logger.exception("Failed reading roles during sync_user_role_mapping(user_id=%s)", user_id)
+        raise
+
+    if not role_row:
+        return
+
+    role_id = role_row["role_id"]
+    conn.execute("DELETE FROM user_roles WHERE user_id = ?", (user_id,))
+    if is_postgres_connection(conn):
+        conn.execute(
+            """
+            INSERT INTO public.user_roles (user_id, role_id, assigned_by_user_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT (user_id, role_id) DO NOTHING
+            """,
+            (user_id, role_id, assigned_by_user_id),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO user_roles (user_id, role_id, assigned_by_user_id)
+            VALUES (?, ?, ?)
+            """,
+            (user_id, role_id, assigned_by_user_id),
+        )
 
 
 def load_authenticated_user(
     conn: sqlite3.Connection,
     user_id: str,
     token_jti: Optional[str] = None,
+    token_exp: Optional[int] = None,
 ) -> Optional[AuthenticatedUser]:
     row = conn.execute(
         """
@@ -210,6 +318,7 @@ def load_authenticated_user(
         must_change_password=bool(row["must_change_password"]),
         permissions=perms,
         token_jti=token_jti,
+        token_exp=token_exp,
     )
 
 
@@ -245,7 +354,7 @@ def get_current_user(
         )
 
     jti = payload.get("jti")
-    if jti in REVOKED_JTIS:
+    if is_token_revoked(conn, jti):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Phiên đăng nhập đã được đăng xuất.",
@@ -260,7 +369,12 @@ def get_current_user(
         )
 
     # Always reload role, permissions, employee_id, department_id from DB so changes apply immediately
-    user = load_authenticated_user(conn, user_id=user_id, token_jti=jti)
+    user = load_authenticated_user(
+        conn,
+        user_id=user_id,
+        token_jti=jti,
+        token_exp=payload.get("exp"),
+    )
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -331,6 +445,56 @@ def build_scope_filter(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Vai trò Quản trị hệ thống (Admin) không mặc định có quyền truy cập dữ liệu nghiệp vụ nhân sự.",
     )
+
+
+def resolve_ai_effective_scope(user: AuthenticatedUser) -> str:
+    """Authoritative AI data scope computed strictly as the intersection of user.role and DB permissions.
+
+    Guarantees:
+    - admin     -> ALWAYS 'none' (Technical Admin has NO HR AI business scope, even if misconfigured).
+    - employee  -> max 'self' (never elevated above 'self' even if wider ai.ask.* permission is misassigned).
+    - manager   -> 'department' if holding ai.ask.department/all/strategy; 'self' if narrowed to ai.ask.self.
+    - hr        -> 'all' if holding ai.ask.all/strategy; 'department' if narrowed; 'self' if narrowed.
+    - executive -> 'all' if holding ai.ask.all/strategy; 'department' if narrowed; 'self' if narrowed.
+    - Anyone with zero AI permissions -> 'none'.
+    """
+    if user.role == RoleEnum.admin:
+        return "none"
+    perms = set(user.permissions)
+    if not (perms & {"ai.ask.self", "ai.ask.department", "ai.ask.all", "ai.strategy"}):
+        return "none"
+    if user.role == RoleEnum.employee:
+        return "self"
+    if user.role == RoleEnum.manager:
+        if perms & {"ai.ask.department", "ai.ask.all", "ai.strategy"}:
+            return "department"
+        return "self"
+    # HR & Executive: enforce dynamic permission narrowing configured in DB RBAC matrix
+    if perms & {"ai.ask.all", "ai.strategy"}:
+        return "all"
+    if "ai.ask.department" in perms:
+        return "department"
+    return "self"
+
+
+def build_ai_scope_filter(
+    user: AuthenticatedUser,
+    employee_col: str = "employee_id",
+    department_col: str = "department_id",
+    force_self: bool = False,
+) -> Tuple[str, List[Any]]:
+    """Server-side AI SQL WHERE scope filter strictly bound to EffectiveScopeResolver (role ∩ permissions)."""
+    scope = resolve_ai_effective_scope(user)
+    if scope == "none":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tài khoản hiện tại không có quyền truy vấn dữ liệu nghiệp vụ nhân sự qua Trợ lý AI.",
+        )
+    if force_self or scope == "self":
+        return f"{employee_col} = ?", [user.employee_id]
+    if scope == "department":
+        return f"{department_col} = ?", [user.department_id]
+    return "1 = 1", []
 
 
 def assert_department_access(user: AuthenticatedUser, requested_department_id: Optional[str]) -> Optional[str]:

@@ -10,9 +10,12 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 import openpyxl
 
-from app.core.security import write_activity_log
+from app.core.permissions import PRIVILEGED_SYSTEM_ROLES
+from app.core.security import begin_write_transaction, sync_user_role_mapping, write_activity_log
 from app.db.connection import DB_INTEGRITY_ERRORS, is_postgres_connection
 from app.services.anomaly_service import run_anomaly_scan
+
+PRIVILEGED_IMPORT_ROLES = PRIVILEGED_SYSTEM_ROLES
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
 ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
@@ -471,12 +474,16 @@ def stage_and_validate_import(
                         if existing_rec.get(field_key) != normalized.get(field_key):
                             changed_fields.append(field_key)
                 is_identical = len(changed_fields) == 0
+                is_privileged_target = bool(in_db and existing_rec and existing_rec.get("role") in PRIVILEGED_IMPORT_ROLES)
                 match_type = "exact_match" if is_identical else "key_conflict"
-                comparison_label = (
-                    "Trùng lặp trong file Excel"
-                    if not in_db
-                    else ("Trùng hoàn toàn" if is_identical else "Trùng khóa, khác dữ liệu")
-                )
+                if is_privileged_target:
+                    comparison_label = "Tài khoản đặc quyền (Admin/Executive) — bị khóa ghi đè qua Import"
+                else:
+                    comparison_label = (
+                        "Trùng lặp trong file Excel"
+                        if not in_db
+                        else ("Trùng hoàn toàn" if is_identical else "Trùng khóa, khác dữ liệu")
+                    )
                 duplicate_rows.append(
                     {
                         "row_number": idx,
@@ -488,7 +495,7 @@ def stage_and_validate_import(
                         "match_type": match_type,
                         "changed_fields": changed_fields,
                         "comparison_label": comparison_label,
-                        "can_update": in_db,
+                        "can_update": bool(in_db and not is_privileged_target),
                         "default_action": "keep_existing",
                     }
                 )
@@ -802,11 +809,15 @@ def get_import_log_detail(
 
     has_snapshot = preview_snapshot is not None
     is_owner = row["uploaded_by"] == actor_user_id
+    mask_staged_batch = bool(row["status"] == "preview" and not is_owner)
+    exposed_batch_id = None if mask_staged_batch else row["batch_id"]
+    if preview_snapshot is not None and mask_staged_batch:
+        preview_snapshot["batch_id"] = None
 
     return {
         "log": {
             "id": row["id"],
-            "batch_id": row["batch_id"],
+            "batch_id": exposed_batch_id,
             "file_name": row["file_name"],
             "data_type": row["data_type"],
             "uploaded_by": row["uploaded_by"],
@@ -908,7 +919,7 @@ def confirm_staged_import(
     action_timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        begin_write_transaction(conn)
         if data_type == "employees":
             for row in batch["valid_rows"]:
                 try:
@@ -962,6 +973,29 @@ def confirm_staged_import(
                         "Giao dịch đã được hủy (rollback) để tránh ghi đè ngoài ý muốn; vui lòng xem trước lại tệp."
                     )
 
+                # Hard guard: HR bulk import must NEVER overwrite/demote Admin or Executive or last active HR
+                if live["role"] in PRIVILEGED_IMPORT_ROLES:
+                    raise PermissionError(
+                        f"Không được phép ghi đè hoặc thay đổi hồ sơ đặc quyền ({live['role']}) của {row['employee_id']} qua Import."
+                    )
+                if live["role"] == "hr" and row["role"] != "hr":
+                    other_hr_cnt = int(
+                        conn.execute(
+                            """
+                            SELECT COUNT(*)
+                            FROM users u
+                            JOIN employees e ON e.employee_id = u.employee_id
+                            WHERE e.role = 'hr' AND u.is_active = 1 AND e.employment_status = 'active'
+                              AND e.employee_id != ?
+                            """,
+                            (row["employee_id"],),
+                        ).fetchone()[0]
+                    )
+                    if other_hr_cnt == 0:
+                        raise ValueError(
+                            f"Không thể hạ quyền tài khoản HR cuối cùng còn hoạt động ({row['employee_id']}) qua Import."
+                        )
+
                 before_snapshot = dict(live)
                 conn.execute(
                     """
@@ -979,6 +1013,13 @@ def confirm_staged_import(
                         row["employee_id"],
                     ),
                 )
+                if row["role"] != live["role"]:
+                    linked_user = conn.execute(
+                        "SELECT user_id FROM users WHERE employee_id = ?",
+                        (row["employee_id"],),
+                    ).fetchone()
+                    if linked_user:
+                        sync_user_role_mapping(conn, linked_user["user_id"], row["role"], assigned_by_user_id=actor_user_id)
                 after_snapshot = {
                     "employee_id": row["employee_id"],
                     "full_name": row["full_name"],

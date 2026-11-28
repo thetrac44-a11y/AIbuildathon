@@ -1,9 +1,9 @@
 # Báo cáo Nghiệm thu Người dùng (UAT – User Acceptance Testing)
 
 - **Dự án**: HR Attendance Copilot
-- **Ngày kiểm thử UAT**: `21/11/2026`
-- **Môi trường kiểm thử**: Frontend Vite (`http://127.0.0.1:5173`), Backend FastAPI (`http://127.0.0.1:8000`), Database SQLite (`backend/hr_attendance.db` seed `2026`).
-- **Kết luận tổng quan**: **CONDITIONAL PASS (Đạt nghiệm thu, 0 Critical / 0 High / 0 Medium; 2 lỗi nhỏ mức Low mới phát hiện: `BUG-11`, `BUG-12`)**.
+- **Ngày kiểm thử UAT**: `21/11/2026` *(Cập nhật trạng thái: `28/11/2026` — cả 2 lỗi `BUG-11` và `BUG-12` đã được khắc phục và kiểm chứng bằng `test_bug11_ai_clarification_for_generic_domain_queries` và `Bugfixes.test.tsx`; hệ thống sau đó đã nâng cấp lên RBAC 5 vai trò và kiểm toán toàn diện tại [`docs/TECHNICAL_AUDIT_REPORT.md`](TECHNICAL_AUDIT_REPORT.md))*
+- **Môi trường kiểm thử UAT ban đầu (v1.0 – 3 vai trò)**: Frontend Vite (`http://127.0.0.1:5173`), Backend FastAPI (`http://127.0.0.1:8000`), Database SQLite (`backend/hr_attendance.db` seed `2026`).
+- **Kết luận ban đầu (21/11/2026)**: **CONDITIONAL PASS** → **Trạng thái hiện tại (28/11/2026): ĐÃ KHẮC PHỤC `BUG-11` & `BUG-12`**.
 
 ## 1. Tóm tắt kết quả 8 hạng mục UAT
 
@@ -18,7 +18,7 @@
 | 7 | Kiểm thử 3 màn hình: Hồ sơ (`07`), Nhập dữ liệu (`08`), Quản lý tài khoản (`10`) | **PASS** *(có `BUG-12` Low)* | Đủ chức năng cập nhật SĐT, preview CSV lỗi, danh sách 80 tài khoản + tab `Nhật ký hoạt động` xem JSON trước/sau. |
 | 8 | Kiểm thử Responsive (`390×844`) & Lỗi trình duyệt | **PASS** | 0 phần tử tràn ngang trên Login/Dashboard/Profile Mobile, mở/đóng Drawer mượt, 0 lỗi JS console ứng dụng. |
 
-## 2. Lỗi mới phát hiện trong UAT
+## 2. Lỗi mới phát hiện trong UAT & Trạng thái khắc phục
 
-1. **`BUG-11` (Low)** – `backend/app/services/ai_assistant.py#L312`: Câu hỏi quá ngắn/mơ hồ 2 từ như `"Chấm công"` (9 ký tự có dấu) vượt qua ngưỡng `len(q_clean) < 8` nên chạy mặc định kỳ `2026-10` thay vì trả `clarification_needed`.
-2. **`BUG-12` (Low)** – `frontend/src/pages/ProfilePage.tsx#L126`: Khối avatar chữ cái `w-14 h-14` thiếu `shrink-0`, bị co hẹp chiều ngang ở màn hình Mobile `390×844`.
+1. **`BUG-11` (Low — ĐÃ SỬA)** – `backend/app/services/ai_assistant.py`: Câu hỏi quá ngắn/mơ hồ 2 từ như `"Chấm công"` trước đây chạy mặc định kỳ `2026-10`. Đã sửa bằng danh sách `generic_ambiguous_queries` trả `clarification_needed` và kiểm chứng bởi `test_bug11_ai_clarification_for_generic_domain_queries` (`backend/tests/test_qa_bugfixes.py`).
+2. **`BUG-12` (Low — ĐÃ SỬA)** – `frontend/src/pages/ProfilePage.tsx`: Khối avatar chữ cái `w-14 h-14` đã được bổ sung `shrink-0` và kiểm chứng bởi `Bugfixes.test.tsx`.

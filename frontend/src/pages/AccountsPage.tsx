@@ -185,6 +185,7 @@ export const AccountsPage: React.FC = () => {
           employee_id: createForm.employee_id.trim().toUpperCase(),
           username: createForm.username.trim().toLowerCase(),
           password: createForm.password,
+          role: createForm.role,
           must_change_password: createForm.must_change_password,
         }),
       });
@@ -379,7 +380,7 @@ export const AccountsPage: React.FC = () => {
           <div>
             <h2 className="text-lg font-bold text-slate-900">Quản lý tài khoản & Bảo mật RBAC</h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Cấp tài khoản đăng nhập, phân quyền vai trò, khóa/mở khóa (bảo vệ tài khoản HR cuối cùng) và tra cứu nhật ký audit.
+              Cấp tài khoản đăng nhập, phân quyền vai trò, khóa/mở khóa (bảo vệ tài khoản Admin & HR cuối cùng) và tra cứu nhật ký audit.
             </p>
           </div>
         </div>
@@ -493,10 +494,13 @@ export const AccountsPage: React.FC = () => {
                     value={createForm.employee_id}
                     onChange={(e) => {
                       const empId = e.target.value;
+                      const picked = employees.find((item) => item.employee_id === empId);
+                      const pickedRole = (picked?.role as UserRole) || 'employee';
                       setCreateForm({
                         ...createForm,
                         employee_id: empId,
                         username: `${empId.toLowerCase()}@company.vn`,
+                        role: assignableRoles.includes(pickedRole) ? pickedRole : assignableRoles[0] || 'employee',
                       });
                     }}
                     className="w-full px-3 py-2 rounded-lg border border-brand-border bg-white"
@@ -529,6 +533,21 @@ export const AccountsPage: React.FC = () => {
                   placeholder="nv081@company.vn"
                   className="w-full px-3 py-2 rounded-lg border border-brand-border"
                 />
+              </div>
+
+              <div>
+                <label className="block font-medium text-slate-700 mb-1">Vai trò truy cập (RBAC) *</label>
+                <select
+                  value={createForm.role}
+                  onChange={(e) => setCreateForm({ ...createForm, role: e.target.value as UserRole })}
+                  className="w-full px-3 py-2 rounded-lg border border-brand-border bg-white"
+                >
+                  {assignableRoles.map((rCode) => (
+                    <option key={rCode} value={rCode}>
+                      {ROLE_LABELS[rCode] || rCode} ({rCode})
+                    </option>
+                  ))}
+                </select>
               </div>
 
               <div>
@@ -689,7 +708,7 @@ export const AccountsPage: React.FC = () => {
         }
         description={
           lockTarget?.is_active === 1
-            ? `Tài khoản ${lockTarget.username} sẽ lập tức không thể đăng nhập hoặc gọi API cho đến khi được HR mở khóa. Hệ thống sẽ từ chối nếu đây là tài khoản HR hoạt động cuối cùng.`
+            ? `Tài khoản ${lockTarget.username} sẽ lập tức không thể đăng nhập hoặc gọi API cho đến khi được Quản trị viên mở khóa. Hệ thống sẽ từ chối nếu đây là tài khoản Admin hoặc HR hoạt động cuối cùng.`
             : `Khôi phục quyền đăng nhập cho tài khoản ${lockTarget?.username}.`
         }
         confirmLabel={lockTarget?.is_active === 1 ? 'Xác nhận khóa' : 'Xác nhận mở khóa'}

@@ -347,6 +347,16 @@ def _ensure_sqlite_rbac_schema(conn: Any) -> Dict[str, Any]:
         )
         """,
         """
+        CREATE TABLE IF NOT EXISTS revoked_tokens (
+            jti TEXT PRIMARY KEY,
+            user_id TEXT NULL,
+            revoked_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+            expires_at TEXT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(user_id) ON UPDATE CASCADE ON DELETE SET NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON revoked_tokens(expires_at);",
+        """
         CREATE TABLE IF NOT EXISTS kiosk_devices (
             kiosk_device_id TEXT PRIMARY KEY,
             device_name TEXT NOT NULL,
@@ -444,6 +454,37 @@ def _ensure_postgres_rbac_schema(conn: Any) -> Dict[str, Any]:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS public.revoked_tokens (
+            jti TEXT PRIMARY KEY,
+            user_id TEXT REFERENCES public.users(user_id)
+                ON UPDATE CASCADE ON DELETE SET NULL,
+            revoked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            expires_at TIMESTAMPTZ
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON public.revoked_tokens(expires_at)")
+    conn.execute("ALTER TABLE public.system_settings ENABLE ROW LEVEL SECURITY")
+    conn.execute("ALTER TABLE public.revoked_tokens ENABLE ROW LEVEL SECURITY")
+    conn.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+                REVOKE ALL ON TABLE public.system_settings, public.revoked_tokens FROM anon;
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+                REVOKE ALL ON TABLE public.system_settings, public.revoked_tokens FROM authenticated;
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+                GRANT ALL ON TABLE public.system_settings, public.revoked_tokens TO service_role;
+            END IF;
+        END;
+        $$
+        """
+    )
+    conn.execute(
+        """
         CREATE OR REPLACE VIEW public.v_leave_requests AS
         SELECT
             lr.request_id,
@@ -471,7 +512,9 @@ def _ensure_postgres_rbac_schema(conn: Any) -> Dict[str, Any]:
         """
     )
     conn.execute("ALTER VIEW public.v_leave_requests SET (security_invoker = true)")
-    changes.append("ensured requires_executive_approval, query_audit_log extensions, system_settings, v_leave_requests on PostgreSQL")
+    changes.append(
+        "ensured requires_executive_approval, query_audit_log extensions, system_settings (RLS), revoked_tokens (RLS), v_leave_requests on PostgreSQL"
+    )
     return {"engine": "postgresql", "changes": changes}
 
 

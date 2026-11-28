@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { getDefaultHomePath } from './config/navigation';
@@ -6,23 +6,30 @@ import { AppShell } from './components/layout/AppShell';
 import { RouteGuard } from './components/layout/RouteGuard';
 import { LoadingSkeleton } from './components/ui/LoadingSkeleton';
 import { LoginPage } from './pages/LoginPage';
-import { DashboardPage } from './pages/DashboardPage';
-import { AttendancePage } from './pages/AttendancePage';
-import { LeavesPage } from './pages/LeavesPage';
-import { AnomaliesPage } from './pages/AnomaliesPage';
-import { AssistantPage } from './pages/AssistantPage';
-import { ReportsPage } from './pages/ReportsPage';
-import { ProfilePage } from './pages/ProfilePage';
-import { ImportPage } from './pages/ImportPage';
-import { EmployeesPage } from './pages/EmployeesPage';
-import { AccountsPage } from './pages/AccountsPage';
-import { DepartmentAnalyticsPage } from './pages/DepartmentAnalyticsPage';
-import { SystemDashboardPage } from './pages/SystemDashboardPage';
-import { RbacManagementPage } from './pages/RbacManagementPage';
-import { AuditLogsPage } from './pages/AuditLogsPage';
-import { RagKnowledgePage } from './pages/RagKnowledgePage';
-import { SystemConfigPage } from './pages/SystemConfigPage';
-import { KioskDevicesPage } from './pages/KioskDevicesPage';
+
+const DashboardPage = lazy(() => import('./pages/DashboardPage').then((m) => ({ default: m.DashboardPage })));
+const AttendancePage = lazy(() => import('./pages/AttendancePage').then((m) => ({ default: m.AttendancePage })));
+const LeavesPage = lazy(() => import('./pages/LeavesPage').then((m) => ({ default: m.LeavesPage })));
+const AnomaliesPage = lazy(() => import('./pages/AnomaliesPage').then((m) => ({ default: m.AnomaliesPage })));
+const AssistantPage = lazy(() => import('./pages/AssistantPage').then((m) => ({ default: m.AssistantPage })));
+const ReportsPage = lazy(() => import('./pages/ReportsPage').then((m) => ({ default: m.ReportsPage })));
+const ProfilePage = lazy(() => import('./pages/ProfilePage').then((m) => ({ default: m.ProfilePage })));
+const ImportPage = lazy(() => import('./pages/ImportPage').then((m) => ({ default: m.ImportPage })));
+const EmployeesPage = lazy(() => import('./pages/EmployeesPage').then((m) => ({ default: m.EmployeesPage })));
+const AccountsPage = lazy(() => import('./pages/AccountsPage').then((m) => ({ default: m.AccountsPage })));
+const DepartmentAnalyticsPage = lazy(() =>
+  import('./pages/DepartmentAnalyticsPage').then((m) => ({ default: m.DepartmentAnalyticsPage }))
+);
+const SystemDashboardPage = lazy(() =>
+  import('./pages/SystemDashboardPage').then((m) => ({ default: m.SystemDashboardPage }))
+);
+const RbacManagementPage = lazy(() =>
+  import('./pages/RbacManagementPage').then((m) => ({ default: m.RbacManagementPage }))
+);
+const AuditLogsPage = lazy(() => import('./pages/AuditLogsPage').then((m) => ({ default: m.AuditLogsPage })));
+const RagKnowledgePage = lazy(() => import('./pages/RagKnowledgePage').then((m) => ({ default: m.RagKnowledgePage })));
+const SystemConfigPage = lazy(() => import('./pages/SystemConfigPage').then((m) => ({ default: m.SystemConfigPage })));
+const KioskDevicesPage = lazy(() => import('./pages/KioskDevicesPage').then((m) => ({ default: m.KioskDevicesPage })));
 
 export const AppRoutes: React.FC = () => {
   const { user, isLoadingAuth } = useAuth();
@@ -45,7 +52,8 @@ export const AppRoutes: React.FC = () => {
 
   return (
     <AppShell>
-      <Routes>
+      <Suspense fallback={<LoadingSkeleton rows={5} />}>
+        <Routes>
         <Route path="/" element={<Navigate to={defaultHome} replace />} />
         <Route
           path="/dashboard"
@@ -200,7 +208,8 @@ export const AppRoutes: React.FC = () => {
           }
         />
         <Route path="*" element={<Navigate to={defaultHome} replace />} />
-      </Routes>
+        </Routes>
+      </Suspense>
     </AppShell>
   );
 };

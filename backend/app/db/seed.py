@@ -87,6 +87,7 @@ def seed_database(db_path: Optional[Path | str] = None, reset: bool = False) -> 
                 "document_chunks",
                 "company_documents",
                 "kiosk_devices",
+                "revoked_tokens",
                 "system_settings",
                 "role_permissions",
                 "user_roles",

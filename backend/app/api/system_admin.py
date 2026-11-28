@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from app.core.permissions import ALL_PERMISSION_CODES
+from app.core.permissions import ALL_PERMISSION_CODES, PROTECTED_ADMIN_PERMISSIONS
 from app.core.security import (
     AuthenticatedUser,
     get_db_dependency,
@@ -21,11 +21,10 @@ from app.schemas.common import RoleEnum
 router = APIRouter(prefix="/api", tags=["system-admin-rbac"])
 
 FORBIDDEN_CONFIG_SUBSTRINGS = ("secret", "password", "api_key", "apikey", "token", "private_key", "credential")
-PROTECTED_ADMIN_PERMISSIONS = {"role.manage", "account.manage", "system.dashboard"}
 
 
 class RolePermissionsUpdateRequest(BaseModel):
-    permissions: List[str] = Field(..., min_length=1)
+    permissions: List[str] = Field(default_factory=list)
 
 
 class SystemSettingUpdateItem(BaseModel):

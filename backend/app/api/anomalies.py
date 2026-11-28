@@ -61,6 +61,11 @@ def trigger_anomaly_scan(
     current_user: AuthenticatedUser = Depends(require_permissions("anomaly.review")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ) -> Dict[str, Any]:
+    if current_user.role not in (RoleEnum.manager, RoleEnum.hr):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Chỉ Trưởng phòng (trong phòng mình) hoặc Nhân sự (HR) mới được chạy quét cảnh báo nghiệp vụ R1-R8.",
+        )
     scope_dept = current_user.department_id if current_user.role == RoleEnum.manager else None
     result = run_anomaly_scan(conn, period=period, department_id=scope_dept)
     write_activity_log(
@@ -181,6 +186,14 @@ def get_anomaly_detail(
     elif current_user.role == RoleEnum.manager:
         if row["department_id"] != current_user.department_id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Trưởng phòng chỉ được xem cảnh báo của phòng mình.")
+    elif current_user.role in (RoleEnum.hr, RoleEnum.executive):
+        if not current_user.has_permission("anomaly.read.all") and row["department_id"] != current_user.department_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tài khoản không có quyền xem cảnh báo ngoài phòng ban.")
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Quản trị hệ thống (Admin) không mặc định truy cập dữ liệu cảnh báo nghiệp vụ R1-R8.",
+        )
 
     return _serialize_anomaly(row, current_user)
 
@@ -192,6 +205,11 @@ def review_anomaly(
     current_user: AuthenticatedUser = Depends(require_permissions("anomaly.review")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ) -> Dict[str, Any]:
+    if current_user.role not in (RoleEnum.manager, RoleEnum.hr):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Chỉ Trưởng phòng (phòng mình) hoặc Nhân sự (HR) mới được xử lý cảnh báo nghiệp vụ R1-R8.",
+        )
     row = conn.execute("SELECT * FROM v_anomalies WHERE anomaly_id = ?", (anomaly_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy cảnh báo bất thường.")

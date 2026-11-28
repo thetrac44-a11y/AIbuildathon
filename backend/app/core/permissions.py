@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
+from app.schemas.common import RoleEnum
+
+# Canonical 5 enterprise role constants (single source of truth across backend)
+ALL_ROLE_CODES: Tuple[str, ...] = tuple(r.value for r in RoleEnum)
+PRIVILEGED_SYSTEM_ROLES = frozenset({RoleEnum.admin.value, RoleEnum.executive.value})
+HR_MANAGED_ROLES = frozenset({RoleEnum.employee.value, RoleEnum.manager.value, RoleEnum.hr.value})
+PROTECTED_ADMIN_PERMISSIONS = frozenset({"role.manage", "account.manage", "system.dashboard"})
+
 # Canonical 5 enterprise roles
 ROLE_CATALOG: List[Tuple[str, str, str]] = [
     ("employee", "Nhân viên", "Xem và thao tác dữ liệu cá nhân"),

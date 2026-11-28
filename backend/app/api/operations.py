@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import datetime
+import logging
 import sqlite3
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
 
@@ -10,6 +11,7 @@ from app.core.security import (
     AuthenticatedUser,
     assert_department_access,
     assert_employee_access,
+    begin_write_transaction,
     build_scope_filter,
     get_current_user,
     get_db_dependency,
@@ -17,6 +19,7 @@ from app.core.security import (
     require_roles,
     write_activity_log,
 )
+from app.db.connection import is_postgres_connection
 from app.schemas.common import RoleEnum
 from app.schemas.operations import (
     AttendanceAdjustRequest,
@@ -34,7 +37,27 @@ from app.services.import_service import (
     stage_and_validate_import,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["attendance-leave-import"])
+
+
+def _parse_attendance_timestamp(raw_value: Optional[str], field_name: str) -> Tuple[Optional[str], Optional[datetime.datetime]]:
+    """Validate and normalize attendance timestamp to 'YYYY-MM-DD HH:MM:SS' (empty string clears to None)."""
+    if raw_value is None:
+        return None, None
+    cleaned = raw_value.strip()
+    if cleaned == "":
+        return None, None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            dt = datetime.datetime.strptime(cleaned, fmt)
+            return dt.strftime("%Y-%m-%d %H:%M:%S"), dt
+        except ValueError:
+            continue
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"Định dạng {field_name} không hợp lệ (yêu cầu YYYY-MM-DD HH:MM:SS).",
+    )
 
 
 # =============================================================================
@@ -140,38 +163,108 @@ def adjust_attendance_record(
     current_user: AuthenticatedUser = Depends(require_permissions("attendance.adjust")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
-    """Business HR attendance adjustment with mandatory reason & audit log (blocked for Executive/Admin/Manager/Employee)."""
-    existing = conn.execute("SELECT * FROM attendance WHERE id = ?", (record_id,)).fetchone()
-    if not existing:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy bản ghi chấm công.")
-
-    before_obj = dict(existing)
-    updates: Dict[str, Any] = {}
-    if payload.check_in is not None:
-        updates["check_in"] = payload.check_in
-    if payload.check_out is not None:
-        updates["check_out"] = payload.check_out
-    if payload.status is not None:
-        updates["status"] = payload.status
-    if not updates:
+    """Business HR attendance adjustment with strict timestamp validation, mandatory reason & audit log."""
+    if current_user.role != RoleEnum.hr:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Chỉ vai trò Nhân sự (HR) mới được phép điều chỉnh dữ liệu chấm công nghiệp vụ.",
+        )
+    if payload.check_in is None and payload.check_out is None and payload.status is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cần cung cấp ít nhất một trường điều chỉnh.")
 
-    updates["source"] = "hr_adjusted"
-    set_clauses = [f"{col} = ?" for col in updates.keys()]
-    conn.execute(f"UPDATE attendance SET {', '.join(set_clauses)} WHERE id = ?", [*updates.values(), record_id])
-
-    after_row = conn.execute("SELECT * FROM v_attendance_daily WHERE id = ?", (record_id,)).fetchone()
-    write_activity_log(
-        conn,
-        actor_user_id=current_user.user_id,
-        action="adjust_attendance",
-        entity_type="attendance",
-        entity_id=str(record_id),
-        before_obj=before_obj,
-        after_obj={**updates, "reason": payload.reason.strip()},
+    parsed_in_str, parsed_in_dt = (
+        _parse_attendance_timestamp(payload.check_in, "check_in") if payload.check_in is not None else (None, None)
     )
-    conn.commit()
-    return {"status": "ok", "record": dict(after_row)}
+    parsed_out_str, parsed_out_dt = (
+        _parse_attendance_timestamp(payload.check_out, "check_out") if payload.check_out is not None else (None, None)
+    )
+
+    begin_write_transaction(conn)
+    try:
+        lock_suffix = " FOR UPDATE" if is_postgres_connection(conn) else ""
+        existing = conn.execute(f"SELECT * FROM attendance WHERE id = ?{lock_suffix}", (record_id,)).fetchone()
+        if not existing:
+            conn.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy bản ghi chấm công.")
+        if existing["employee_id"] == current_user.employee_id:
+            conn.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Không được phép tự điều chỉnh dữ liệu chấm công của chính mình.",
+            )
+
+        before_obj = dict(existing)
+        work_date_dt = datetime.date.fromisoformat(str(existing["work_date"])[:10])
+        updates: Dict[str, Any] = {}
+
+        if payload.check_in is not None:
+            updates["check_in"] = parsed_in_str
+        if payload.check_out is not None:
+            updates["check_out"] = parsed_out_str
+        if payload.status is not None:
+            updates["status"] = payload.status
+            if payload.status in ("absent", "on_leave", "holiday") and payload.check_in is None and payload.check_out is None:
+                updates["check_in"] = None
+                updates["check_out"] = None
+
+        effective_status = updates.get("status", existing["status"])
+        effective_check_in = updates["check_in"] if "check_in" in updates else existing["check_in"]
+        effective_check_out = updates["check_out"] if "check_out" in updates else existing["check_out"]
+
+        if effective_status in ("absent", "on_leave", "holiday") and (effective_check_in or effective_check_out):
+            conn.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Trạng thái vắng, nghỉ phép hoặc ngày lễ không được đi kèm giờ check-in/check-out.",
+            )
+
+        eff_in_dt = parsed_in_dt if "check_in" in updates else (
+            _parse_attendance_timestamp(str(effective_check_in), "check_in")[1] if effective_check_in else None
+        )
+        eff_out_dt = parsed_out_dt if "check_out" in updates else (
+            _parse_attendance_timestamp(str(effective_check_out), "check_out")[1] if effective_check_out else None
+        )
+
+        if eff_in_dt is not None and eff_in_dt.date() != work_date_dt:
+            conn.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Ngày của check_in ({eff_in_dt.date().isoformat()}) phải khớp work_date ({work_date_dt.isoformat()}).",
+            )
+        if eff_out_dt is not None and eff_out_dt.date() not in (work_date_dt, work_date_dt + datetime.timedelta(days=1)):
+            conn.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Ngày của check_out ({eff_out_dt.date().isoformat()}) không khớp work_date ({work_date_dt.isoformat()}).",
+            )
+        if eff_in_dt is not None and eff_out_dt is not None and eff_out_dt < eff_in_dt:
+            conn.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Giờ ra (check_out) phải lớn hơn hoặc bằng giờ vào (check_in).",
+            )
+
+        updates["source"] = "hr_adjusted"
+        set_clauses = [f"{col} = ?" for col in updates.keys()]
+        conn.execute(f"UPDATE attendance SET {', '.join(set_clauses)} WHERE id = ?", [*updates.values(), record_id])
+
+        after_row = conn.execute("SELECT * FROM v_attendance_daily WHERE id = ?", (record_id,)).fetchone()
+        write_activity_log(
+            conn,
+            actor_user_id=current_user.user_id,
+            action="adjust_attendance",
+            entity_type="attendance",
+            entity_id=str(record_id),
+            before_obj=before_obj,
+            after_obj={**updates, "reason": payload.reason.strip()},
+        )
+        conn.commit()
+        return {"status": "ok", "record": dict(after_row)}
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
 
 
 # =============================================================================
@@ -204,9 +297,15 @@ def _is_executive_approval_enabled(conn: sqlite3.Connection) -> bool:
         ).fetchone()
         if row is not None:
             return str(row["setting_value"]).strip().lower() in ("true", "1", "yes", "on")
-    except Exception:
-        pass
-    return True
+        return True
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "no such table" in msg or "does not exist" in msg or "undefinedtable" in msg:
+            if is_postgres_connection(conn):
+                conn.rollback()
+            return True
+        logger.exception("Failed reading workflow.executive_approval_enabled from system_settings")
+        raise
 
 
 @router.get("/leaves")
@@ -378,56 +477,73 @@ def create_leave_request(
     # Calendar days inclusive (matching PDF specification)
     requested_days = (t_dt - f_dt).days + 1
 
-    # Overlap check against pending/approved leaves
-    overlap = conn.execute(
-        """
-        SELECT request_id FROM leave_requests
-        WHERE employee_id = ? AND status IN ('pending', 'approved')
-          AND NOT (to_date < ? OR from_date > ?)
-        """,
-        (current_user.employee_id, payload.from_date, payload.to_date),
-    ).fetchone()
-    if overlap:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Khoảng thời gian nghỉ bị trùng với một đơn đang chờ duyệt hoặc đã được duyệt.",
-        )
+    begin_write_transaction(conn)
+    try:
+        if is_postgres_connection(conn):
+            # Serialize concurrent leave submissions per employee on PostgreSQL
+            conn.execute(
+                "SELECT employee_id FROM employees WHERE employee_id = ? FOR UPDATE",
+                (current_user.employee_id,),
+            ).fetchone()
 
-    # Validate annual leave balance (do NOT deduct yet while pending)
-    if payload.leave_type == "annual":
-        bal = _get_annual_leave_balance_info(conn, current_user.employee_id)
-        if requested_days > bal["remaining_annual_leave"]:
+        # Overlap check against pending/approved leaves
+        overlap = conn.execute(
+            """
+            SELECT request_id FROM leave_requests
+            WHERE employee_id = ? AND status IN ('pending', 'approved')
+              AND NOT (to_date < ? OR from_date > ?)
+            """,
+            (current_user.employee_id, payload.from_date, payload.to_date),
+        ).fetchone()
+        if overlap:
+            conn.rollback()
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Số ngày phép năm còn lại ({bal['remaining_annual_leave']} ngày) không đủ cho đơn {requested_days} ngày.",
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Khoảng thời gian nghỉ bị trùng với một đơn đang chờ duyệt hoặc đã được duyệt.",
             )
 
-    req_exec_flag = 1 if payload.requires_executive_approval else 0
-    cur = conn.execute(
-        """
-        INSERT INTO leave_requests (employee_id, leave_type, from_date, to_date, reason, status, requires_executive_approval)
-        VALUES (?, ?, ?, ?, ?, 'pending', ?)
-        """,
-        (current_user.employee_id, payload.leave_type, payload.from_date, payload.to_date, payload.reason.strip(), req_exec_flag),
-    )
-    req_id = cur.lastrowid
+        # Validate annual leave balance (do NOT deduct yet while pending)
+        if payload.leave_type == "annual":
+            bal = _get_annual_leave_balance_info(conn, current_user.employee_id)
+            if requested_days > bal["remaining_annual_leave"]:
+                conn.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Số ngày phép năm còn lại ({bal['remaining_annual_leave']} ngày) không đủ cho đơn {requested_days} ngày.",
+                )
 
-    conn.execute(
-        """
-        INSERT INTO leave_approval_logs (request_id, actor_user_id, action, note)
-        VALUES (?, ?, 'submit', ?)
-        """,
-        (req_id, current_user.user_id, payload.reason.strip()),
-    )
-    write_activity_log(
-        conn,
-        actor_user_id=current_user.user_id,
-        action="create_leave_request",
-        entity_type="leave_request",
-        entity_id=str(req_id),
-        after_obj={"employee_id": current_user.employee_id, "from_date": payload.from_date, "to_date": payload.to_date, "leave_days": requested_days},
-    )
-    conn.commit()
+        req_exec_flag = 1 if payload.requires_executive_approval else 0
+        cur = conn.execute(
+            """
+            INSERT INTO leave_requests (employee_id, leave_type, from_date, to_date, reason, status, requires_executive_approval)
+            VALUES (?, ?, ?, ?, ?, 'pending', ?)
+            """,
+            (current_user.employee_id, payload.leave_type, payload.from_date, payload.to_date, payload.reason.strip(), req_exec_flag),
+        )
+        req_id = cur.lastrowid
+
+        conn.execute(
+            """
+            INSERT INTO leave_approval_logs (request_id, actor_user_id, action, note)
+            VALUES (?, ?, 'submit', ?)
+            """,
+            (req_id, current_user.user_id, payload.reason.strip()),
+        )
+        write_activity_log(
+            conn,
+            actor_user_id=current_user.user_id,
+            action="create_leave_request",
+            entity_type="leave_request",
+            entity_id=str(req_id),
+            after_obj={"employee_id": current_user.employee_id, "from_date": payload.from_date, "to_date": payload.to_date, "leave_days": requested_days},
+        )
+        conn.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+
     created = conn.execute("SELECT * FROM v_leave_requests WHERE request_id = ?", (req_id,)).fetchone()
     return {"status": "ok", "request": dict(created)}
 
@@ -438,33 +554,50 @@ def cancel_leave_request(
     current_user: AuthenticatedUser = Depends(require_permissions("leave.create.self")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
-    row = conn.execute("SELECT * FROM leave_requests WHERE request_id = ?", (request_id,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy đơn nghỉ phép.")
-    if row["employee_id"] != current_user.employee_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Bạn chỉ có thể hủy đơn nghỉ phép của chính mình.")
-    if row["status"] != "pending":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Chỉ có thể hủy đơn khi đang ở trạng thái chờ duyệt (pending).")
+    begin_write_transaction(conn)
+    try:
+        lock_suffix = " FOR UPDATE" if is_postgres_connection(conn) else ""
+        row = conn.execute(f"SELECT * FROM leave_requests WHERE request_id = ?{lock_suffix}", (request_id,)).fetchone()
+        if not row:
+            conn.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy đơn nghỉ phép.")
+        if row["employee_id"] != current_user.employee_id:
+            conn.rollback()
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Bạn chỉ có thể hủy đơn nghỉ phép của chính mình.")
+        if row["status"] != "pending":
+            conn.rollback()
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Chỉ có thể hủy đơn khi đang ở trạng thái chờ duyệt (pending).")
 
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn.execute(
-        "UPDATE leave_requests SET status = 'cancelled', cancelled_at = ? WHERE request_id = ?",
-        (now_str, request_id),
-    )
-    conn.execute(
-        "INSERT INTO leave_approval_logs (request_id, actor_user_id, action, note) VALUES (?, ?, 'cancel', 'Nhân viên tự hủy đơn')",
-        (request_id, current_user.user_id),
-    )
-    write_activity_log(
-        conn,
-        actor_user_id=current_user.user_id,
-        action="cancel_leave_request",
-        entity_type="leave_request",
-        entity_id=str(request_id),
-        before_obj={"status": "pending"},
-        after_obj={"status": "cancelled"},
-    )
-    conn.commit()
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        upd = conn.execute(
+            "UPDATE leave_requests SET status = 'cancelled', cancelled_at = ? WHERE request_id = ? AND status = 'pending'",
+            (now_str, request_id),
+        )
+        if upd.rowcount != 1:
+            conn.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Đơn nghỉ phép đã thay đổi trạng thái trong lúc xử lý. Vui lòng tải lại.",
+            )
+        conn.execute(
+            "INSERT INTO leave_approval_logs (request_id, actor_user_id, action, note) VALUES (?, ?, 'cancel', 'Nhân viên tự hủy đơn')",
+            (request_id, current_user.user_id),
+        )
+        write_activity_log(
+            conn,
+            actor_user_id=current_user.user_id,
+            action="cancel_leave_request",
+            entity_type="leave_request",
+            entity_id=str(request_id),
+            before_obj={"status": "pending"},
+            after_obj={"status": "cancelled"},
+        )
+        conn.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
     return {"status": "ok", "request_id": request_id, "new_status": "cancelled"}
 
 
@@ -477,60 +610,6 @@ def review_leave_request(
     ),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
-    row = conn.execute(
-        """
-        SELECT lr.*, e.department_id, e.role AS requester_role
-        FROM leave_requests lr
-        JOIN employees e ON e.employee_id = lr.employee_id
-        WHERE lr.request_id = ?
-        """,
-        (request_id,),
-    ).fetchone()
-    if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy đơn nghỉ phép.")
-
-    # Never allow self-approval
-    if row["employee_id"] == current_user.employee_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Không được phép tự duyệt đơn nghỉ phép của chính mình.",
-        )
-
-    # Manager can only review employees in their own department (and not other managers/HR)
-    if current_user.role == RoleEnum.manager:
-        if row["department_id"] != current_user.department_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Trưởng phòng chỉ được duyệt đơn nghỉ phép của nhân viên thuộc phòng ban mình.",
-            )
-        if row["requester_role"] != "employee":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Đơn nghỉ phép của cấp quản lý cần được bộ phận Nhân sự (HR) phê duyệt.",
-            )
-    elif current_user.role == RoleEnum.executive:
-        if not _is_executive_approval_enabled(conn):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Chức năng phê duyệt cấp điều hành hiện đang tắt trong cấu hình hệ thống.",
-            )
-        if not bool(row["requires_executive_approval"]):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Cấp lãnh đạo chỉ được phê duyệt các đơn được đánh dấu yêu cầu phê duyệt cấp cao (requires_executive_approval = true).",
-            )
-    elif not current_user.has_permission("leave.approve.all"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Bạn không có quyền phê duyệt đơn nghỉ phép này.",
-        )
-
-    if row["status"] != "pending":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Đơn nghỉ phép đang ở trạng thái '{row['status']}', không thể phê duyệt lại.",
-        )
-
     note = (payload.decision_note or "").strip()
     if payload.decision == "rejected" and not note:
         raise HTTPException(
@@ -538,64 +617,141 @@ def review_leave_request(
             detail="Bắt buộc phải nhập lý do khi từ chối đơn nghỉ phép.",
         )
 
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn.execute(
-        """
-        UPDATE leave_requests
-        SET status = ?, reviewed_by = ?, reviewed_at = ?, decision_note = ?
-        WHERE request_id = ?
-        """,
-        (payload.decision, current_user.employee_id, now_str, note or "Đã phê duyệt", request_id),
-    )
+    begin_write_transaction(conn)
+    try:
+        lock_suffix = " FOR UPDATE OF lr" if is_postgres_connection(conn) else ""
+        row = conn.execute(
+            f"""
+            SELECT lr.*, e.department_id, e.role AS requester_role
+            FROM leave_requests lr
+            JOIN employees e ON e.employee_id = lr.employee_id
+            WHERE lr.request_id = ?{lock_suffix}
+            """,
+            (request_id,),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy đơn nghỉ phép.")
 
-    # Only when approved: sync weekdays (non-holidays) to attendance table as on_leave if not present
-    if payload.decision == "approved":
-        holiday_set = {r[0] for r in conn.execute("SELECT holiday_date FROM holidays").fetchall()}
-        cur_d = datetime.date.fromisoformat(row["from_date"])
-        end_d = datetime.date.fromisoformat(row["to_date"])
-        while cur_d <= end_d:
-            d_str = cur_d.isoformat()
-            if cur_d.weekday() < 5 and d_str not in holiday_set:
-                existing_att = conn.execute(
-                    "SELECT id, status FROM attendance WHERE employee_id = ? AND work_date = ?",
-                    (row["employee_id"], d_str),
-                ).fetchone()
-                if not existing_att:
-                    conn.execute(
-                        """
-                        INSERT INTO attendance (employee_id, work_date, check_in, check_out, status, source)
-                        VALUES (?, ?, NULL, NULL, 'on_leave', 'leave_system')
-                        """,
+        # Never allow self-approval
+        if row["employee_id"] == current_user.employee_id:
+            conn.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Không được phép tự duyệt đơn nghỉ phép của chính mình.",
+            )
+
+        # Manager can only review employees in their own department (and not other managers/HR)
+        if current_user.role == RoleEnum.manager:
+            if row["department_id"] != current_user.department_id:
+                conn.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Trưởng phòng chỉ được duyệt đơn nghỉ phép của nhân viên thuộc phòng ban mình.",
+                )
+            if row["requester_role"] != "employee":
+                conn.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Đơn nghỉ phép của cấp quản lý cần được bộ phận Nhân sự (HR) phê duyệt.",
+                )
+        elif current_user.role == RoleEnum.executive:
+            if not _is_executive_approval_enabled(conn):
+                conn.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Chức năng phê duyệt cấp điều hành hiện đang tắt trong cấu hình hệ thống.",
+                )
+            if not bool(row["requires_executive_approval"]):
+                conn.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Cấp lãnh đạo chỉ được phê duyệt các đơn được đánh dấu yêu cầu phê duyệt cấp cao (requires_executive_approval = true).",
+                )
+        elif not current_user.has_permission("leave.approve.all"):
+            conn.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Bạn không có quyền phê duyệt đơn nghỉ phép này.",
+            )
+
+        if row["status"] != "pending":
+            conn.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Đơn nghỉ phép đang ở trạng thái '{row['status']}', không thể phê duyệt lại.",
+            )
+
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        upd = conn.execute(
+            """
+            UPDATE leave_requests
+            SET status = ?, reviewed_by = ?, reviewed_at = ?, decision_note = ?
+            WHERE request_id = ? AND status = 'pending'
+            """,
+            (payload.decision, current_user.employee_id, now_str, note or "Đã phê duyệt", request_id),
+        )
+        if upd.rowcount != 1:
+            conn.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Đơn nghỉ phép đã được xử lý đồng thời bởi người khác. Vui lòng tải lại.",
+            )
+
+        # Only when approved: sync weekdays (non-holidays) to attendance table as on_leave if not present
+        if payload.decision == "approved":
+            holiday_set = {r[0] for r in conn.execute("SELECT holiday_date FROM holidays").fetchall()}
+            cur_d = datetime.date.fromisoformat(str(row["from_date"])[:10])
+            end_d = datetime.date.fromisoformat(str(row["to_date"])[:10])
+            while cur_d <= end_d:
+                d_str = cur_d.isoformat()
+                if cur_d.weekday() < 5 and d_str not in holiday_set:
+                    existing_att = conn.execute(
+                        "SELECT id, status FROM attendance WHERE employee_id = ? AND work_date = ?",
                         (row["employee_id"], d_str),
-                    )
-                elif existing_att["status"] == "absent":
-                    conn.execute(
-                        "UPDATE attendance SET status = 'on_leave', source = 'leave_system' WHERE id = ?",
-                        (existing_att["id"],),
-                    )
-            cur_d += datetime.timedelta(days=1)
+                    ).fetchone()
+                    if not existing_att:
+                        conn.execute(
+                            """
+                            INSERT INTO attendance (employee_id, work_date, check_in, check_out, status, source)
+                            VALUES (?, ?, NULL, NULL, 'on_leave', 'leave_system')
+                            """,
+                            (row["employee_id"], d_str),
+                        )
+                    elif existing_att["status"] == "absent":
+                        conn.execute(
+                            "UPDATE attendance SET status = 'on_leave', source = 'leave_system' WHERE id = ?",
+                            (existing_att["id"],),
+                        )
+                cur_d += datetime.timedelta(days=1)
 
-    log_action = "approve" if payload.decision == "approved" else "reject"
-    if current_user.role == RoleEnum.hr and row["department_id"] != current_user.department_id:
-        log_action = "override" if payload.decision == "approved" else "reject"
+        log_action = "approve" if payload.decision == "approved" else "reject"
+        if current_user.role == RoleEnum.hr and row["department_id"] != current_user.department_id:
+            log_action = "override" if payload.decision == "approved" else "reject"
 
-    conn.execute(
-        """
-        INSERT INTO leave_approval_logs (request_id, actor_user_id, action, note)
-        VALUES (?, ?, ?, ?)
-        """,
-        (request_id, current_user.user_id, log_action, note or "Đã phê duyệt"),
-    )
-    write_activity_log(
-        conn,
-        actor_user_id=current_user.user_id,
-        action=f"leave_{payload.decision}",
-        entity_type="leave_request",
-        entity_id=str(request_id),
-        before_obj={"status": "pending"},
-        after_obj={"status": payload.decision, "decision_note": note},
-    )
-    conn.commit()
+        conn.execute(
+            """
+            INSERT INTO leave_approval_logs (request_id, actor_user_id, action, note)
+            VALUES (?, ?, ?, ?)
+            """,
+            (request_id, current_user.user_id, log_action, note or "Đã phê duyệt"),
+        )
+        write_activity_log(
+            conn,
+            actor_user_id=current_user.user_id,
+            action=f"leave_{payload.decision}",
+            entity_type="leave_request",
+            entity_id=str(request_id),
+            before_obj={"status": "pending"},
+            after_obj={"status": payload.decision, "decision_note": note},
+        )
+        conn.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+
     updated = conn.execute("SELECT * FROM v_leave_requests WHERE request_id = ?", (request_id,)).fetchone()
     return {"status": "ok", "request": dict(updated)}
 
@@ -709,6 +865,8 @@ def list_import_logs(
     for r in rows:
         item = dict(r)
         item["has_snapshot"] = bool(item.get("has_snapshot"))
+        if item.get("status") == "preview" and item.get("uploaded_by") != current_user.user_id:
+            item["batch_id"] = None
         items.append(item)
     return {"total": len(items), "items": items}
 

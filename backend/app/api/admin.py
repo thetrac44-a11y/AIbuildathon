@@ -6,10 +6,12 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.core.config import settings
+from app.core.permissions import PRIVILEGED_SYSTEM_ROLES
 from app.core.security import (
     AuthenticatedUser,
     assert_department_access,
     assert_employee_access,
+    begin_write_transaction,
     build_scope_filter,
     get_current_user,
     get_db_dependency,
@@ -18,6 +20,7 @@ from app.core.security import (
     sync_user_role_mapping,
     write_activity_log,
 )
+from app.db.connection import is_postgres_connection
 from app.schemas.auth import (
     AccountCreateRequest,
     AccountUpdateRequest,
@@ -29,7 +32,6 @@ from app.services.metrics_service import compute_attendance_rates
 
 router = APIRouter(prefix="/api", tags=["dashboard-and-admin"])
 
-PRIVILEGED_SYSTEM_ROLES = {RoleEnum.admin.value, RoleEnum.executive.value}
 TECHNICAL_AUDIT_ACTIONS = ("update_system_config", "update_role_permissions", "manage_kiosk_device")
 
 
@@ -37,7 +39,21 @@ def _count_active_accounts_by_role(
     conn: sqlite3.Connection,
     role_code: str,
     exclude_user_id: Optional[str] = None,
+    for_update: bool = False,
 ) -> int:
+    if for_update and is_postgres_connection(conn):
+        rows = conn.execute(
+            """
+            SELECT u.user_id
+            FROM users u
+            JOIN employees e ON e.employee_id = u.employee_id
+            WHERE e.role = ? AND u.is_active = 1 AND e.employment_status = 'active'
+            FOR UPDATE
+            """,
+            (role_code,),
+        ).fetchall()
+        return sum(1 for r in rows if exclude_user_id is None or r["user_id"] != exclude_user_id)
+
     sql = """
         SELECT COUNT(*)
         FROM users u
@@ -66,7 +82,12 @@ def get_dashboard_summary(
 ) -> Dict[str, Any]:
     effective_dept = assert_department_access(current_user, department_id)
     scope_sql, scope_params = build_scope_filter(current_user, "employee_id", "department_id")
-    is_company_scope = current_user.role in (RoleEnum.hr, RoleEnum.executive)
+    is_company_scope = current_user.role in (RoleEnum.hr, RoleEnum.executive) and current_user.has_any_permission(
+        "dashboard.all", "dashboard.executive"
+    )
+    if current_user.role in (RoleEnum.hr, RoleEnum.executive) and not is_company_scope:
+        effective_dept = current_user.department_id
+        scope_sql, scope_params = "department_id = ?", [current_user.department_id]
 
     where_clauses = [scope_sql, "period = ?"]
     params: List[Any] = [*scope_params, period]
@@ -376,19 +397,36 @@ def list_employees(
     ),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
+    # Hard defense-in-depth: Employee must NEVER list company/department employees even if misconfigured
+    if current_user.role == RoleEnum.employee:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Nhân viên chỉ được xem hồ sơ cá nhân, không được truy cập danh sách nhân sự.",
+        )
     if current_user.role == RoleEnum.manager and not settings.allow_manager_employee_read:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Chức năng xem danh sách nhân viên không bật cho Trưởng phòng.",
         )
 
+    # Unconditionally enforce server-side RBAC scope filter (blocks Admin with 403, scopes Manager to own dept)
+    scope_sql, scope_params = build_scope_filter(current_user, "e.employee_id", "e.department_id")
     effective_dept = assert_department_access(current_user, department_id)
-    where_clauses = ["1 = 1"]
-    params: List[Any] = []
+    can_read_company_all = current_user.role in (RoleEnum.hr, RoleEnum.executive) and current_user.has_any_permission(
+        "employee.read.all", "employee.manage"
+    )
 
-    if effective_dept:
+    where_clauses = [scope_sql]
+    params: List[Any] = [*scope_params]
+
+    if can_read_company_all:
+        if effective_dept:
+            where_clauses.append("e.department_id = ?")
+            params.append(effective_dept)
+    elif current_user.role in (RoleEnum.hr, RoleEnum.executive):
+        # If HR/Executive only holds department-level read permission, restrict to own department
         where_clauses.append("e.department_id = ?")
-        params.append(effective_dept)
+        params.append(current_user.department_id)
     if employment_status and employment_status != "all":
         where_clauses.append("e.employment_status = ?")
         params.append(employment_status)
@@ -531,78 +569,100 @@ def update_employee(
     current_user: AuthenticatedUser = Depends(require_permissions("employee.manage")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
-    existing = conn.execute("SELECT * FROM employees WHERE employee_id = ?", (employee_id,)).fetchone()
-    if not existing:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy nhân viên.")
-
-    before_dict = dict(existing)
     updates = payload.model_dump(exclude_unset=True, mode="json")
     if not updates:
+        exists = conn.execute("SELECT 1 FROM employees WHERE employee_id = ?", (employee_id,)).fetchone()
+        if not exists:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy nhân viên.")
         return {"status": "ok", "employee_id": employee_id}
 
-    # HR cannot modify admin/executive role or escalate any employee to admin/executive
-    if not current_user.has_permission("role.manage"):
-        if "role" in updates and updates["role"] in PRIVILEGED_SYSTEM_ROLES:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Nhân sự (HR) không có quyền nâng quyền lên vai trò Admin hoặc Executive.",
-            )
-        if before_dict["role"] in PRIVILEGED_SYSTEM_ROLES and ("role" in updates or "employment_status" in updates):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Nhân sự (HR) không có quyền thay đổi vai trò hoặc trạng thái tài khoản Admin/Executive.",
-            )
+    begin_write_transaction(conn)
+    try:
+        emp_lock_suffix = " FOR UPDATE" if is_postgres_connection(conn) else ""
+        existing = conn.execute(
+            f"SELECT * FROM employees WHERE employee_id = ?{emp_lock_suffix}",
+            (employee_id,),
+        ).fetchone()
+        if not existing:
+            conn.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy nhân viên.")
 
-    linked_user = conn.execute(
-        "SELECT user_id, is_active FROM users WHERE employee_id = ?",
-        (employee_id,),
-    ).fetchone()
+        before_dict = dict(existing)
 
-    # Protect the last active Admin and last active HR account
-    if linked_user and linked_user["is_active"] == 1:
-        for protected_role, label in [("admin", "Quản trị viên (Admin)"), ("hr", "HR")]:
-            if before_dict["role"] == protected_role:
-                demoting = "role" in updates and updates["role"] != protected_role
-                deactivating = "employment_status" in updates and updates["employment_status"] != "active"
-                if (demoting or deactivating) and _count_active_accounts_by_role(
-                    conn, protected_role, exclude_user_id=linked_user["user_id"]
-                ) == 0:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Không thể hạ quyền hoặc ngừng hoạt động tài khoản {label} cuối cùng còn hoạt động.",
-                    )
+        # HR cannot modify admin/executive role or escalate any employee to admin/executive
+        if not current_user.has_permission("role.manage"):
+            if "role" in updates and updates["role"] in PRIVILEGED_SYSTEM_ROLES:
+                conn.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Nhân sự (HR) không có quyền nâng quyền lên vai trò Admin hoặc Executive.",
+                )
+            if before_dict["role"] in PRIVILEGED_SYSTEM_ROLES and ("role" in updates or "employment_status" in updates):
+                conn.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Nhân sự (HR) không có quyền thay đổi vai trò hoặc trạng thái tài khoản Admin/Executive.",
+                )
 
-    if "department_id" in updates:
-        dept = conn.execute("SELECT 1 FROM departments WHERE department_id = ?", (updates["department_id"],)).fetchone()
-        if not dept:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Phòng ban không hợp lệ.")
+        linked_user = conn.execute(
+            f"SELECT user_id, is_active FROM users WHERE employee_id = ?{emp_lock_suffix}",
+            (employee_id,),
+        ).fetchone()
 
-    if "manager_id" in updates and updates["manager_id"]:
-        if updates["manager_id"] == employee_id:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nhân viên không thể tự quản lý chính mình.")
-        mgr = conn.execute("SELECT 1 FROM employees WHERE employee_id = ?", (updates["manager_id"],)).fetchone()
-        if not mgr:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Quản lý trực tiếp không tồn tại.")
+        # Protect the last active Admin and last active HR account atomically
+        if linked_user and linked_user["is_active"] == 1:
+            for protected_role, label in [("admin", "Quản trị viên (Admin)"), ("hr", "HR")]:
+                if before_dict["role"] == protected_role:
+                    demoting = "role" in updates and updates["role"] != protected_role
+                    deactivating = "employment_status" in updates and updates["employment_status"] != "active"
+                    if (demoting or deactivating) and _count_active_accounts_by_role(
+                        conn, protected_role, exclude_user_id=linked_user["user_id"], for_update=True
+                    ) == 0:
+                        conn.rollback()
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Không thể hạ quyền hoặc ngừng hoạt động tài khoản {label} cuối cùng còn hoạt động.",
+                        )
 
-    set_clauses = [f"{col} = ?" for col in updates.keys()]
-    values = list(updates.values()) + [employee_id]
-    conn.execute(f"UPDATE employees SET {', '.join(set_clauses)} WHERE employee_id = ?", values)
+        if "department_id" in updates:
+            dept = conn.execute("SELECT 1 FROM departments WHERE department_id = ?", (updates["department_id"],)).fetchone()
+            if not dept:
+                conn.rollback()
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Phòng ban không hợp lệ.")
 
-    if "role" in updates and linked_user:
-        sync_user_role_mapping(conn, linked_user["user_id"], updates["role"], assigned_by_user_id=current_user.user_id)
+        if "manager_id" in updates and updates["manager_id"]:
+            if updates["manager_id"] == employee_id:
+                conn.rollback()
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nhân viên không thể tự quản lý chính mình.")
+            mgr = conn.execute("SELECT 1 FROM employees WHERE employee_id = ?", (updates["manager_id"],)).fetchone()
+            if not mgr:
+                conn.rollback()
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Quản lý trực tiếp không tồn tại.")
 
-    after_row = conn.execute("SELECT * FROM employees WHERE employee_id = ?", (employee_id,)).fetchone()
-    write_activity_log(
-        conn,
-        actor_user_id=current_user.user_id,
-        action="update_employee",
-        entity_type="employee",
-        entity_id=employee_id,
-        before_obj=before_dict,
-        after_obj=dict(after_row),
-    )
-    conn.commit()
-    return {"status": "ok", "employee": dict(after_row)}
+        set_clauses = [f"{col} = ?" for col in updates.keys()]
+        values = list(updates.values()) + [employee_id]
+        conn.execute(f"UPDATE employees SET {', '.join(set_clauses)} WHERE employee_id = ?", values)
+
+        if "role" in updates and linked_user:
+            sync_user_role_mapping(conn, linked_user["user_id"], updates["role"], assigned_by_user_id=current_user.user_id)
+
+        after_row = conn.execute("SELECT * FROM employees WHERE employee_id = ?", (employee_id,)).fetchone()
+        write_activity_log(
+            conn,
+            actor_user_id=current_user.user_id,
+            action="update_employee",
+            entity_type="employee",
+            entity_id=employee_id,
+            before_obj=before_dict,
+            after_obj=dict(after_row),
+        )
+        conn.commit()
+        return {"status": "ok", "employee": dict(after_row)}
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
 
 
 # =============================================================================
@@ -751,97 +811,109 @@ def update_account(
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
     is_system_admin = current_user.has_permission("account.manage")
-    existing = conn.execute(
-        """
-        SELECT u.user_id, u.username, u.employee_id, u.is_active, u.must_change_password, e.role, e.employment_status
-        FROM users u
-        JOIN employees e ON e.employee_id = u.employee_id
-        WHERE u.user_id = ?
-        """,
-        (user_id,),
-    ).fetchone()
-    if not existing:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy tài khoản.")
+    begin_write_transaction(conn)
+    try:
+        lock_suffix = " FOR UPDATE" if is_postgres_connection(conn) else ""
+        existing = conn.execute(
+            f"""
+            SELECT u.user_id, u.username, u.employee_id, u.is_active, u.must_change_password, e.role, e.employment_status
+            FROM users u
+            JOIN employees e ON e.employee_id = u.employee_id
+            WHERE u.user_id = ?{lock_suffix}
+            """,
+            (user_id,),
+        ).fetchone()
+        if not existing:
+            conn.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy tài khoản.")
 
-    # HR MUST NOT modify admin/executive accounts or promote anyone to admin/executive
-    if not is_system_admin:
-        if existing["role"] in PRIVILEGED_SYSTEM_ROLES:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Nhân sự (HR) không có quyền chỉnh sửa hoặc khóa tài khoản Admin/Executive.",
+        # HR MUST NOT modify admin/executive accounts or promote anyone to admin/executive
+        if not is_system_admin:
+            if existing["role"] in PRIVILEGED_SYSTEM_ROLES:
+                conn.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Nhân sự (HR) không có quyền chỉnh sửa hoặc khóa tài khoản Admin/Executive.",
+                )
+            if payload.role is not None and payload.role.value in PRIVILEGED_SYSTEM_ROLES:
+                conn.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Nhân sự (HR) không được phép nâng quyền tài khoản lên Admin hoặc Executive.",
+                )
+
+        before_obj = dict(existing)
+
+        # Protect last active Admin account (including self-lock) AND last active HR account atomically
+        if existing["is_active"] == 1:
+            for protected_role, label in [("admin", "Quản trị viên (Admin)"), ("hr", "HR")]:
+                if existing["role"] == protected_role:
+                    locking = payload.is_active is False
+                    demoting = payload.role is not None and payload.role.value != protected_role
+                    if (locking or demoting) and _count_active_accounts_by_role(
+                        conn, protected_role, exclude_user_id=user_id, for_update=True
+                    ) == 0:
+                        conn.rollback()
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Không thể khóa hoặc hạ quyền tài khoản {label} cuối cùng còn hoạt động.",
+                        )
+
+        if payload.role is not None:
+            conn.execute(
+                "UPDATE employees SET role = ? WHERE employee_id = ?",
+                (payload.role.value, existing["employee_id"]),
             )
-        if payload.role is not None and payload.role.value in PRIVILEGED_SYSTEM_ROLES:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Nhân sự (HR) không được phép nâng quyền tài khoản lên Admin hoặc Executive.",
+            sync_user_role_mapping(conn, user_id, payload.role.value, assigned_by_user_id=current_user.user_id)
+        if payload.is_active is not None:
+            conn.execute(
+                "UPDATE users SET is_active = ? WHERE user_id = ?",
+                (1 if payload.is_active else 0, user_id),
+            )
+        if payload.reset_password is not None:
+            new_hash = hash_password(payload.reset_password)
+            must_change = 1 if (payload.must_change_password is None or payload.must_change_password) else 0
+            conn.execute(
+                "UPDATE users SET password_hash = ?, must_change_password = ? WHERE user_id = ?",
+                (new_hash, must_change, user_id),
+            )
+        elif payload.must_change_password is not None:
+            conn.execute(
+                "UPDATE users SET must_change_password = ? WHERE user_id = ?",
+                (1 if payload.must_change_password else 0, user_id),
             )
 
-    before_obj = dict(existing)
+        after_row = conn.execute(
+            """
+            SELECT u.user_id, u.username, u.employee_id, u.is_active, u.must_change_password, e.role
+            FROM users u
+            JOIN employees e ON e.employee_id = u.employee_id
+            WHERE u.user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
 
-    # Protect last active Admin account (including self-lock) AND last active HR account
-    if existing["is_active"] == 1:
-        for protected_role, label in [("admin", "Quản trị viên (Admin)"), ("hr", "HR")]:
-            if existing["role"] == protected_role:
-                locking = payload.is_active is False
-                demoting = payload.role is not None and payload.role.value != protected_role
-                if (locking or demoting) and _count_active_accounts_by_role(
-                    conn, protected_role, exclude_user_id=user_id
-                ) == 0:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Không thể khóa hoặc hạ quyền tài khoản {label} cuối cùng còn hoạt động.",
-                    )
+        after_obj = dict(after_row)
+        if payload.reset_password is not None:
+            after_obj["password_reset"] = True  # Never log plaintext password!
 
-    if payload.role is not None:
-        conn.execute(
-            "UPDATE employees SET role = ? WHERE employee_id = ?",
-            (payload.role.value, existing["employee_id"]),
+        action_name = "change_role" if (payload.role is not None and payload.role.value != existing["role"]) else "update_account"
+        write_activity_log(
+            conn,
+            actor_user_id=current_user.user_id,
+            action=action_name,
+            entity_type="user",
+            entity_id=user_id,
+            before_obj=before_obj,
+            after_obj=after_obj,
         )
-        sync_user_role_mapping(conn, user_id, payload.role.value, assigned_by_user_id=current_user.user_id)
-    if payload.is_active is not None:
-        conn.execute(
-            "UPDATE users SET is_active = ? WHERE user_id = ?",
-            (1 if payload.is_active else 0, user_id),
-        )
-    if payload.reset_password is not None:
-        new_hash = hash_password(payload.reset_password)
-        must_change = 1 if (payload.must_change_password is None or payload.must_change_password) else 0
-        conn.execute(
-            "UPDATE users SET password_hash = ?, must_change_password = ? WHERE user_id = ?",
-            (new_hash, must_change, user_id),
-        )
-    elif payload.must_change_password is not None:
-        conn.execute(
-            "UPDATE users SET must_change_password = ? WHERE user_id = ?",
-            (1 if payload.must_change_password else 0, user_id),
-        )
-
-    after_row = conn.execute(
-        """
-        SELECT u.user_id, u.username, u.employee_id, u.is_active, u.must_change_password, e.role
-        FROM users u
-        JOIN employees e ON e.employee_id = u.employee_id
-        WHERE u.user_id = ?
-        """,
-        (user_id,),
-    ).fetchone()
-
-    after_obj = dict(after_row)
-    if payload.reset_password is not None:
-        after_obj["password_reset"] = True  # Never log plaintext password!
-
-    action_name = "change_role" if (payload.role is not None and payload.role.value != existing["role"]) else "update_account"
-    write_activity_log(
-        conn,
-        actor_user_id=current_user.user_id,
-        action=action_name,
-        entity_type="user",
-        entity_id=user_id,
-        before_obj=before_obj,
-        after_obj=after_obj,
-    )
-    conn.commit()
-    return {"status": "ok", "account": dict(after_row)}
+        conn.commit()
+        return {"status": "ok", "account": dict(after_row)}
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
 
 
 # =============================================================================

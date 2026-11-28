@@ -1,8 +1,9 @@
 # Báo cáo Rà soát Bảo mật & Nghiệm thu QA (Prompt 9)
 
 - **Dự án**: HR Attendance Copilot
-- **Ngày rà soát**: `21/11/2026`
-- **Phạm vi**: Toàn bộ mã nguồn Backend (`backend/app/`, `backend/sql/`, `backend/tests/`), Frontend (`frontend/src/`, `frontend/dist/`), cấu hình môi trường (`.gitignore`, `.env.example`) và tài liệu bàn giao (`README.md`, `docs/`).
+- **Ngày rà soát đợt 1 (v1.0 – 3 vai trò)**: `21/11/2026`
+- **Cập nhật sau kiểm toán đợt 2 (v1.2 – 5 vai trò RBAC & Supabase PostgreSQL, `28/11/2026`)**: Xem báo cáo kiểm toán mới nhất tại [`docs/TECHNICAL_AUDIT_REPORT.md`](TECHNICAL_AUDIT_REPORT.md) (**60/60 backend pytest**, **21/21 frontend Vitest**, **27/27 bảng Supabase bật RLS**, `SEC-10` đã được xử lý bền vững bằng bảng `revoked_tokens` và `import_logs.detail_json`).
+- **Phạm vi đợt 1**: Toàn bộ mã nguồn Backend (`backend/app/`, `backend/sql/`, `backend/tests/`), Frontend (`frontend/src/`, `frontend/dist/`), cấu hình môi trường (`.gitignore`, `.env.example`) và tài liệu bàn giao (`README.md`, `docs/`).
 
 ---
 
@@ -19,7 +20,7 @@
 | **SEC-07** | **Medium** | `backend/app/main.py` | CORS dùng `allow_methods=["*"]`, `allow_headers=["*"]` kết hợp `allow_credentials=True`; thiếu các HTTP security headers. | Siết CORS về đúng method (`GET, POST, PATCH, DELETE, OPTIONS`) và header (`Authorization, Content-Type`); bổ sung middleware gắn `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Cache-Control: no-store` cho mọi đường dẫn `/api/`. Kiểm chứng bởi `test_sec05_sec07_security_headers_and_strict_scope_isolation`. | **ĐÃ SỬA & PASS** |
 | **SEC-08** | **Medium** | `backend/app/services/import_service.py`, `backend/app/api/operations.py` | Phiên import tạm (`batch_id`) không kiểm tra chủ sở hữu (`uploaded_by`), cho phép một HR khác tải file lỗi hoặc xác nhận nhầm batch đang staging của người khác. | Tăng độ dài ngẫu nhiên `batch_id` (16 ký tự hex) và kiểm tra `batch["uploaded_by"] == actor_user_id` (trả `403` nếu khác chủ sở hữu). Kiểm chứng bởi `test_sec08_import_batch_ownership_enforced`. | **ĐÃ SỬA & PASS** |
 | **SEC-09** | **Medium** | `backend/app/services/ai_assistant.py` | Khi Manager hỏi về mã NV ngoài phòng, phản hồi cho mã tồn tại khác với mã không tồn tại (existence oracle); thiếu từ khóa `"phòng khác"` trong bộ lọc phạm vi Manager. | Thống nhất câu từ chối trung lập cho mọi mã NV không thuộc phòng Manager quản lý và bổ sung chặn `"phòng khác"`. Kiểm chứng bởi `test_sec09_manager_ai_no_employee_existence_oracle`. | **ĐÃ SỬA & PASS** |
-| **SEC-10** | **Low** | `backend/app/core/security.py`, `backend/app/services/import_service.py` | `REVOKED_JTIS` và `STAGING_BATCHES` lưu trong RAM của tiến trình FastAPI (phù hợp MVP đơn tiến trình, nhưng sẽ mất khi restart hoặc không chia sẻ được giữa nhiều worker). | Ghi nhận rõ trong mục Giới hạn của `README.md` để nâng cấp sang Redis/PostgreSQL trước khi triển khai production đa worker. | **ĐÃ GHI NHẬN (MVP)** |
+| **SEC-10** | **Low** | `backend/app/core/security.py`, `backend/app/services/import_service.py` | Ở bản v1.0, `REVOKED_JTIS` và `STAGING_BATCHES` chỉ lưu trong RAM của tiến trình FastAPI. | Đợt kiểm toán `28/11/2026`: JWT revocation đã được lưu bền vững vào bảng `revoked_tokens` (`AUDIT-SEC-04`), còn import staging đã lưu snapshot vào `import_logs.detail_json` và tự động khôi phục qua `_hydrate_batch_from_db()` sau restart. | **ĐÃ SỬA (28/11/2026)** |
 
 ---
 

@@ -18,6 +18,8 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from fastapi import HTTPException, status
+
 from app.core.security import AuthenticatedUser, assert_department_access, build_scope_filter
 from app.schemas.common import RoleEnum
 from app.services.import_service import sanitize_cell_for_export
@@ -62,14 +64,31 @@ def collect_metrics(
     department_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Compute 100% of report KPIs and tables strictly via SQL from RBAC-validated scope."""
+    if user.role in (RoleEnum.employee, RoleEnum.admin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Vai trò hiện tại không có quyền xem hoặc xuất báo cáo chấm công phòng ban/công ty.",
+        )
     effective_dept = assert_department_access(user, department_id)
     scope_sql, scope_params = build_scope_filter(user, "employee_id", "department_id")
 
+    can_read_company_all = user.role in (RoleEnum.hr, RoleEnum.executive) and user.has_permission("report.read.all")
     where_parts = [scope_sql, "period = ?"]
     params: List[Any] = [*scope_params, period]
-    if effective_dept and user.role in (RoleEnum.hr, RoleEnum.executive):
+    if can_read_company_all:
+        if effective_dept:
+            where_parts.append("department_id = ?")
+            params.append(effective_dept)
+    elif user.role in (RoleEnum.hr, RoleEnum.executive):
+        # Permission narrowed to report.read.department -> enforce own department strictly
+        if effective_dept and effective_dept != user.department_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Tài khoản chỉ được cấp quyền xem báo cáo trong phạm vi phòng ban của mình.",
+            )
+        effective_dept = user.department_id
         where_parts.append("department_id = ?")
-        params.append(effective_dept)
+        params.append(user.department_id)
     where_str = " AND ".join(where_parts)
 
     scope_label = "Toàn công ty"

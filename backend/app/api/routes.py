@@ -8,11 +8,7 @@ router = APIRouter(prefix="/api")
 
 
 def build_screens(allow_manager_employee_read: bool = True) -> List[NavigationScreen]:
-    employee_mgmt_roles = (
-        [RoleEnum.hr, RoleEnum.manager, RoleEnum.executive]
-        if allow_manager_employee_read
-        else [RoleEnum.hr, RoleEnum.executive]
-    )
+    employee_mgmt_roles = [RoleEnum.hr, RoleEnum.manager] if allow_manager_employee_read else [RoleEnum.hr]
     return [
         NavigationScreen(
             id="dashboard",
@@ -29,8 +25,8 @@ def build_screens(allow_manager_employee_read: bool = True) -> List[NavigationSc
             title="Chấm công",
             path="/attendance",
             group="Không gian làm việc",
-            any_permissions=["attendance.read.self", "attendance.read.department", "attendance.read.all"],
-            allowed_roles=[RoleEnum.employee, RoleEnum.manager, RoleEnum.hr, RoleEnum.executive],
+            any_permissions=["attendance.face_checkin", "attendance.read.department", "attendance.adjust"],
+            allowed_roles=[RoleEnum.employee, RoleEnum.manager, RoleEnum.hr],
         ),
         NavigationScreen(
             id="leaves",
@@ -92,7 +88,7 @@ def build_screens(allow_manager_employee_read: bool = True) -> List[NavigationSc
             title="Quản lý nhân viên",
             path="/admin/employees",
             group="Quản trị nhân sự",
-            any_permissions=["employee.read.department", "employee.read.all", "employee.manage"],
+            any_permissions=["employee.read.department", "employee.manage"],
             allowed_roles=employee_mgmt_roles,
         ),
         NavigationScreen(

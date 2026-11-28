@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { X } from 'lucide-react';
+import { Pencil, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { hasPermission } from '../config/navigation';
 import { apiFetch, ApiError } from '../lib/api';
+import { PermissionGuard } from '../components/layout/PermissionGuard';
 import { FilterBar } from '../components/ui/FilterBar';
 import { DataTable, ColumnDef } from '../components/ui/DataTable';
-import { StatusBadge, BadgeVariant } from '../components/ui/StatusBadge';
+import { StatusBadge } from '../components/ui/StatusBadge';
 import { LoadingSkeleton } from '../components/ui/LoadingSkeleton';
 import { ErrorState } from '../components/ui/ErrorState';
 
@@ -44,14 +46,60 @@ function renderAttendanceBadge(row: AttendanceRow) {
 }
 
 export const AttendancePage: React.FC = () => {
-  const { user, selectedPeriod } = useAuth();
+  const { user, selectedPeriod, showToast } = useAuth();
+  const canAdjustAttendance = hasPermission(user, 'attendance.adjust') && user?.role === 'hr';
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [page, setPage] = useState(1);
   const [resp, setResp] = useState<AttendanceResponse | null>(null);
   const [selectedRow, setSelectedRow] = useState<AttendanceRow | null>(null);
+  const [adjCheckIn, setAdjCheckIn] = useState('');
+  const [adjCheckOut, setAdjCheckOut] = useState('');
+  const [adjStatus, setAdjStatus] = useState('present');
+  const [adjReason, setAdjReason] = useState('');
+  const [savingAdj, setSavingAdj] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const openDetailDrawer = (row: AttendanceRow) => {
+    setSelectedRow(row);
+    setAdjCheckIn(row.check_in ?? '');
+    setAdjCheckOut(row.check_out ?? '');
+    setAdjStatus(row.status);
+    setAdjReason('');
+  };
+
+  const handleAdjustSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedRow) return;
+    if (adjReason.trim().length < 3) {
+      showToast('Vui lòng nhập lý do điều chỉnh chấm công (tối thiểu 3 ký tự).', 'error');
+      return;
+    }
+    setSavingAdj(true);
+    try {
+      const updated = await apiFetch<{ status: string; record: AttendanceRow }>(
+        `/attendance/${selectedRow.id}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({
+            check_in: adjCheckIn.trim(),
+            check_out: adjCheckOut.trim(),
+            status: adjStatus,
+            reason: adjReason.trim(),
+          }),
+        }
+      );
+      showToast(`Đã điều chỉnh ngày công ${selectedRow.work_date} (${selectedRow.employee_id}).`, 'success');
+      setSelectedRow(updated.record);
+      setAdjReason('');
+      loadData();
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.message : 'Điều chỉnh chấm công thất bại.', 'error');
+    } finally {
+      setSavingAdj(false);
+    }
+  };
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -101,7 +149,10 @@ export const AttendancePage: React.FC = () => {
     <div className="space-y-4">
       <div className="text-xs text-slate-500">
         Quy chuẩn chấm công: <strong>08:30–17:30</strong>, nghỉ trưa 1 giờ (8h/ngày), ân hạn đi muộn{' '}
-        <strong>5 phút</strong>. Đây là lịch sử dữ liệu ghi nhận (chỉ đọc).
+        <strong>5 phút</strong>.{' '}
+        {canAdjustAttendance
+          ? 'HR có thể nhấp vào dòng chấm công nhân viên khác để điều chỉnh nghiệp vụ có lý do và audit.'
+          : 'Đây là lịch sử dữ liệu ghi nhận (chỉ đọc).'}
       </div>
 
       <FilterBar
@@ -129,7 +180,7 @@ export const AttendancePage: React.FC = () => {
           columns={columns}
           data={resp?.items ?? []}
           rowKey={(r) => String(r.id)}
-          onRowClick={(r) => setSelectedRow(r)}
+          onRowClick={openDetailDrawer}
           pagination={
             resp
               ? {
@@ -194,6 +245,76 @@ export const AttendancePage: React.FC = () => {
                 <dd className="font-medium">{selectedRow.source}</dd>
               </div>
             </dl>
+
+            <PermissionGuard permission="attendance.adjust" roles={['hr']}>
+              {selectedRow.employee_id !== user?.employee_id ? (
+                <form
+                  onSubmit={handleAdjustSubmit}
+                  className="mt-6 pt-5 border-t border-brand-border space-y-3 text-xs"
+                >
+                  <div className="flex items-center gap-1.5 font-bold text-slate-900">
+                    <Pencil className="w-3.5 h-3.5 text-brand-blue" />
+                    <span>Điều chỉnh chấm công nghiệp vụ (HR)</span>
+                  </div>
+                  <div>
+                    <label className="block text-slate-600 mb-1">Trạng thái</label>
+                    <select
+                      value={adjStatus}
+                      onChange={(e) => setAdjStatus(e.target.value)}
+                      className="w-full px-3 py-1.5 rounded-lg border border-brand-border bg-white"
+                    >
+                      <option value="present">Có mặt (present)</option>
+                      <option value="absent">Vắng mặt (absent)</option>
+                      <option value="on_leave">Nghỉ phép (on_leave)</option>
+                      <option value="holiday">Ngày lễ (holiday)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-600 mb-1">Giờ vào (YYYY-MM-DD HH:MM:SS)</label>
+                    <input
+                      type="text"
+                      value={adjCheckIn}
+                      onChange={(e) => setAdjCheckIn(e.target.value)}
+                      placeholder={`${selectedRow.work_date} 08:25:00`}
+                      className="w-full px-3 py-1.5 rounded-lg border border-brand-border font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-600 mb-1">Giờ ra (YYYY-MM-DD HH:MM:SS)</label>
+                    <input
+                      type="text"
+                      value={adjCheckOut}
+                      onChange={(e) => setAdjCheckOut(e.target.value)}
+                      placeholder={`${selectedRow.work_date} 17:30:00`}
+                      className="w-full px-3 py-1.5 rounded-lg border border-brand-border font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-600 mb-1">Lý do điều chỉnh (bắt buộc) *</label>
+                    <textarea
+                      required
+                      minLength={3}
+                      rows={2}
+                      value={adjReason}
+                      onChange={(e) => setAdjReason(e.target.value)}
+                      placeholder="VD: Đối soát vân tay thực tế / lỗi đồng bộ máy chấm công"
+                      className="w-full px-3 py-1.5 rounded-lg border border-brand-border"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={savingAdj}
+                    className="w-full py-2 rounded-lg bg-brand-blue text-white font-semibold hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {savingAdj ? 'Đang lưu điều chỉnh...' : 'Lưu điều chỉnh công'}
+                  </button>
+                </form>
+              ) : (
+                <p className="mt-5 pt-4 border-t border-brand-border text-[11px] text-slate-500">
+                  Không cho phép tự điều chỉnh bản ghi chấm công của chính mình.
+                </p>
+              )}
+            </PermissionGuard>
           </div>
         </div>
       )}

@@ -135,7 +135,7 @@ describe('AppShell, Auth & 5-Role Permission-Based Navigation', () => {
     expect(within(nav).queryByRole('link', { name: 'Phân quyền' })).not.toBeInTheDocument();
     expect(within(nav).queryByRole('link', { name: 'Cấu hình hệ thống' })).not.toBeInTheDocument();
     expect(screen.getByText('Toàn công ty')).toBeInTheDocument();
-    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled(), { timeout: 5000 });
   });
 
   it('hides Reports and HR Admin screens for Employee role and shows personal Data Scope', async () => {

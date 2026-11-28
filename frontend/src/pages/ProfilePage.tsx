@@ -19,7 +19,9 @@ import { ErrorState } from '../components/ui/ErrorState';
 const ROLE_LABELS: Record<string, string> = {
   employee: 'Nhân viên (Employee)',
   manager: 'Trưởng phòng (Manager)',
-  hr: 'Nhân sự / Quản trị (HR)',
+  hr: 'Nhân sự (HR)',
+  executive: 'Cấp lãnh đạo (Executive)',
+  admin: 'Quản trị hệ thống (Admin)',
 };
 
 export const ProfilePage: React.FC = () => {

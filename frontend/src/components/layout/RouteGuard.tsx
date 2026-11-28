@@ -20,7 +20,13 @@ export const RouteGuard: React.FC<RouteGuardProps> = ({ screenId, children }) =>
 
   if (!user || !screen || !canAccessScreen(user, screen)) {
     const homePath = user ? getDefaultHomePath(user) : '/dashboard';
-    const homeLabel = homePath === '/admin/system' ? 'Quay về System Dashboard' : 'Quay về Tổng quan';
+    const homeLabel =
+      homePath === '/admin/system'
+        ? 'Quay về System Dashboard'
+        : homePath === '/profile'
+          ? 'Quay về Hồ sơ cá nhân'
+          : 'Quay về Tổng quan';
+    const roleDisplay = (user?.role || 'CHƯA ĐĂNG NHẬP').toUpperCase();
     return (
       <div className="rounded-card border border-red-200 bg-white p-8 text-center max-w-lg mx-auto my-8 shadow-sm">
         <div className="w-12 h-12 rounded-full bg-red-50 text-brand-red flex items-center justify-center mx-auto mb-3">
@@ -28,7 +34,7 @@ export const RouteGuard: React.FC<RouteGuardProps> = ({ screenId, children }) =>
         </div>
         <h2 className="text-base font-bold text-slate-900">403 – Không có quyền truy cập</h2>
         <p className="mt-2 text-xs text-slate-600 leading-relaxed">
-          Vai trò hiện tại (<strong>{user?.role.toUpperCase() ?? 'CHƯA ĐĂNG NHẬP'}</strong>) không được cấp quyền
+          Vai trò hiện tại (<strong>{roleDisplay}</strong>) không được cấp quyền
           truy cập màn hình <strong>{screen ? (user ? getScreenTitle(screen, user.role) : screen.title) : screenId}</strong>.
           Quyền truy cập dữ liệu cũng được kiểm tra bắt buộc ở tầng Backend API.
         </p>

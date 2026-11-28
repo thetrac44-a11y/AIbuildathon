@@ -409,12 +409,13 @@ describe('BUG-01 to BUG-10 Frontend Regression Suite', () => {
       </AuthProvider>
     );
 
+    const previewBtn = await screen.findByRole('button', { name: /Kiểm tra & Xem trước/i });
     const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
     const dummyFile = new File(['dummy'], 'Demo_Import_Cham_Cong_BGK.xlsx', {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     });
     fireEvent.change(fileInput, { target: { files: [dummyFile] } });
-    fireEvent.click(screen.getByRole('button', { name: /Kiểm tra & Xem trước/i }));
+    fireEvent.click(previewBtn);
 
     // Verify 5 KPI cards & inline business warnings + future-date guard
     expect(await screen.findByText('Dòng đủ điều kiện nhập')).toBeInTheDocument();

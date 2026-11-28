@@ -134,7 +134,17 @@ def logout(
     current_user: AuthenticatedUser = Depends(get_current_user),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
-    revoke_token(current_user.token_jti)
+    expires_at_str = None
+    if current_user.token_exp:
+        expires_at_str = datetime.datetime.fromtimestamp(
+            current_user.token_exp, tz=datetime.timezone.utc
+        ).strftime("%Y-%m-%d %H:%M:%S")
+    revoke_token(
+        current_user.token_jti,
+        conn=conn,
+        user_id=current_user.user_id,
+        expires_at=expires_at_str,
+    )
     write_activity_log(
         conn,
         actor_user_id=current_user.user_id,

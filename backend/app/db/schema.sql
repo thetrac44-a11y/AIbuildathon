@@ -231,6 +231,14 @@ CREATE TABLE IF NOT EXISTS system_settings (
     FOREIGN KEY (updated_by_user_id) REFERENCES users(user_id) ON UPDATE CASCADE ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS revoked_tokens (
+    jti TEXT PRIMARY KEY,
+    user_id TEXT NULL,
+    revoked_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+    expires_at TEXT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON UPDATE CASCADE ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS kiosk_devices (
     kiosk_device_id TEXT PRIMARY KEY,
     device_name TEXT NOT NULL,
@@ -290,6 +298,7 @@ CREATE INDEX IF NOT EXISTS idx_anomalies_emp ON anomalies(employee_id);
 CREATE INDEX IF NOT EXISTS idx_users_employee ON users(employee_id);
 CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_query_audit_asked ON query_audit_log(asked_at);
+CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON revoked_tokens(expires_at);
 
 -- =============================================================================
 -- 4. SAFE ALLOWLIST VIEWS FOR AI & REPORTING

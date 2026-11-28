@@ -89,6 +89,12 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, string[]> = {
   ],
 };
 
+export const VALID_ROLES: readonly UserRole[] = ['employee', 'manager', 'hr', 'executive', 'admin'];
+
+export function isValidRole(role: string): role is UserRole {
+  return (VALID_ROLES as readonly string[]).includes(role);
+}
+
 export interface PermissionSubject {
   role: UserRole;
   permissions?: string[];
@@ -98,7 +104,8 @@ export function resolvePermissions(subject: UserRole | PermissionSubject): Set<s
   if (typeof subject === 'string') {
     return new Set(DEFAULT_ROLE_PERMISSIONS[subject] ?? []);
   }
-  if (subject.permissions && subject.permissions.length > 0) {
+  // Honor explicit permissions array (including [] when all permissions were revoked by Admin!)
+  if (Array.isArray(subject.permissions)) {
     return new Set(subject.permissions);
   }
   return new Set(DEFAULT_ROLE_PERMISSIONS[subject.role] ?? []);
@@ -362,10 +369,23 @@ export function getDefaultHomePath(subject: UserRole | PermissionSubject): strin
   if (hasPermission(subject, 'system.dashboard') && !hasPermission(subject, 'dashboard.all')) {
     return '/admin/system';
   }
+  if (
+    hasAnyPermission(subject, [
+      'dashboard.self',
+      'dashboard.department',
+      'dashboard.all',
+      'dashboard.executive',
+    ])
+  ) {
+    return '/dashboard';
+  }
+  if (hasPermission(subject, 'profile.read.self')) {
+    return '/profile';
+  }
   return '/dashboard';
 }
 
-export function getDataScopeLabel(role: UserRole): string {
+export function getDataScopeLabel(role: UserRole | string): string {
   switch (role) {
     case 'employee':
       return 'Dữ liệu cá nhân';
@@ -377,6 +397,8 @@ export function getDataScopeLabel(role: UserRole): string {
       return 'Toàn công ty';
     case 'admin':
       return 'Quản trị hệ thống';
+    default:
+      return 'Không xác định';
   }
 }
 

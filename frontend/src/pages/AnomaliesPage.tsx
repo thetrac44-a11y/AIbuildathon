@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { RefreshCw, X, CheckCircle2, EyeOff } from 'lucide-react';
+import { RefreshCw, X, CheckCircle2, EyeOff, Building2, UserCheck, Calendar } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../config/navigation';
 import { apiFetch, ApiError } from '../lib/api';
+import { BusinessEvidence } from '../components/anomalies/BusinessEvidence';
+import { formatPeriodVN } from '../utils/businessEvidence';
 import { KpiCard } from '../components/ui/KpiCard';
 import { FilterBar } from '../components/ui/FilterBar';
 import { DataTable, ColumnDef } from '../components/ui/DataTable';
@@ -339,15 +341,19 @@ export const AnomaliesPage: React.FC = () => {
         />
       )}
 
-      {/* Detail Modal matching Mockup Hinh 5 */}
+      {/* Detail Modal: Business-Friendly Evidence Layout (No raw SQL/JSON) */}
       {selected && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
           <div className="w-full max-w-2xl rounded-card border border-brand-border bg-white p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-start justify-between gap-3">
+            {/* 1. Tiêu đề và mức độ cảnh báo */}
+            <div className="flex items-start justify-between gap-3 pb-3 border-b border-brand-border">
               <div>
-                <div className="flex items-center gap-2 mb-1.5">
-                  <StatusBadge label={`Mức độ ${SEV_VN[selected.severity]}`} variant={selected.severity} />
-                  {selected.scope_type === 'department' && <StatusBadge label="Cảnh báo cấp phòng" variant="info" />}
+                <div className="flex flex-wrap items-center gap-2 mb-2">
+                  <StatusBadge label={`Mức độ ${SEV_VN[selected.severity] ?? selected.severity}`} variant={selected.severity} />
+                  <StatusBadge
+                    label={selected.scope_type === 'department' ? 'Cảnh báo cấp phòng ban' : 'Cảnh báo cấp cá nhân'}
+                    variant="info"
+                  />
                   <StatusBadge
                     label={REV_VN[selected.review_status]?.label ?? selected.review_status}
                     variant={REV_VN[selected.review_status]?.variant ?? 'info'}
@@ -356,47 +362,69 @@ export const AnomaliesPage: React.FC = () => {
                 <h3 className="text-base font-bold text-slate-900">
                   {selected.rule_code} – {RULE_TITLES[selected.rule_code] ?? selected.anomaly_type}
                 </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  {selected.scope_type === 'department'
-                    ? `Phòng ${selected.department_name} · Kỳ ${selected.period}`
-                    : `${selected.employee_id} · ${selected.full_name} · Phòng ${selected.department_name} · Kỳ ${selected.period}`}
-                </p>
               </div>
-              <button type="button" onClick={closeDetailModal}>
-                <X className="w-4 h-4 text-slate-500" />
+              <button
+                type="button"
+                aria-label="Đóng cửa sổ chi tiết cảnh báo"
+                onClick={closeDetailModal}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+              >
+                <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="rounded-xl border border-blue-200 bg-blue-50/60 p-4">
-              <p className="text-xs font-bold text-brand-navy mb-1">Giải thích của hệ thống</p>
-              <p className="text-xs text-slate-700 leading-relaxed">{selected.explanation}</p>
+            {/* 2. Thông tin nhân viên / phòng ban liên quan */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 rounded-xl border border-brand-border bg-brand-bg/60 px-4 py-3 text-xs">
+              <div className="flex items-center gap-2 min-w-0">
+                <Building2 className="w-4 h-4 text-brand-blue shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-[10px] uppercase tracking-wide text-slate-500 font-semibold">Phòng ban</p>
+                  <p className="font-semibold text-slate-900 truncate">{selected.department_name || 'Chưa xác định'}</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 min-w-0">
+                <UserCheck className="w-4 h-4 text-brand-teal shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-[10px] uppercase tracking-wide text-slate-500 font-semibold">Đối tượng</p>
+                  <p className="font-semibold text-slate-900 truncate">
+                    {selected.scope_type === 'department'
+                      ? `Tập thể phòng ${selected.department_name || ''}`
+                      : `${selected.full_name || 'Nhân sự'} (${selected.employee_id || '—'})`}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 min-w-0">
+                <Calendar className="w-4 h-4 text-slate-500 shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-[10px] uppercase tracking-wide text-slate-500 font-semibold">Kỳ ghi nhận</p>
+                  <p className="font-semibold text-slate-900 truncate">{formatPeriodVN(selected.period)}</p>
+                </div>
+              </div>
             </div>
 
-            <div>
-              <p className="text-xs font-bold text-slate-800 mb-2">Bằng chứng dữ liệu gốc (SQL Evidence)</p>
-              <pre className="rounded-xl border border-brand-border bg-slate-50 p-3.5 text-[11px] text-slate-700 overflow-x-auto whitespace-pre-wrap">
-                {JSON.stringify(selected.evidence_data, null, 2)}
-              </pre>
-            </div>
+            {/* 3 & 4. Khối Bằng chứng xác minh + Phần Nhận xét bằng ngôn ngữ tự nhiên */}
+            <BusinessEvidence anomaly={selected} />
 
-            {selected.can_review && (
+            {/* 5 & 6. Ghi chú xem xét và nút cập nhật trạng thái xử lý */}
+            {selected.can_review ? (
               <div className="pt-3 border-t border-brand-border space-y-3">
-                <label className="block text-xs font-semibold text-slate-700">
+                <label htmlFor="anomaly-review-note" className="block text-xs font-semibold text-slate-700">
                   Ghi chú xem xét của quản lý / HR
                 </label>
                 <textarea
+                  id="anomaly-review-note"
                   rows={2}
                   value={reviewNote}
                   onChange={(e) => setReviewNote(e.target.value)}
                   placeholder="Ghi chú xác minh (VD: nhân viên đi công tác, đã trao đổi nhắc nhở)..."
-                  className="w-full px-3 py-2 text-xs rounded-lg border border-brand-border"
+                  className="w-full px-3 py-2 text-xs rounded-lg border border-brand-border focus:outline-none focus:border-brand-blue"
                 />
                 <div className="flex flex-wrap justify-end gap-2">
                   <button
                     type="button"
                     disabled={submitting}
                     onClick={() => handleReview('dismissed')}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-brand-border text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-brand-border text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                   >
                     <EyeOff className="w-3.5 h-3.5" /> Bỏ qua cảnh báo
                   </button>
@@ -404,12 +432,21 @@ export const AnomaliesPage: React.FC = () => {
                     type="button"
                     disabled={submitting}
                     onClick={() => handleReview('confirmed')}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-brand-green text-white text-xs font-semibold hover:bg-emerald-800"
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-brand-green text-white text-xs font-semibold hover:bg-emerald-800 disabled:opacity-50"
                   >
                     <CheckCircle2 className="w-3.5 h-3.5" /> Xác nhận cần xử lý
                   </button>
                 </div>
               </div>
+            ) : (
+              selected.review_note && (
+                <div className="pt-3 border-t border-brand-border text-xs">
+                  <p className="font-semibold text-slate-700 mb-1">Ghi chú đã xem xét</p>
+                  <p className="rounded-lg border border-brand-border bg-slate-50 px-3 py-2 text-slate-700">
+                    {selected.review_note}
+                  </p>
+                </div>
+              )
             )}
           </div>
         </div>

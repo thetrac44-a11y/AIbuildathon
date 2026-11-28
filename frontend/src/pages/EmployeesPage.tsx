@@ -1,13 +1,16 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Eye, Pencil, Plus, Power, UserPlus, Users, X } from 'lucide-react';
+import { Eye, Lock, Pencil, Plus, Power, UserPlus, Users, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { hasAnyPermission, hasPermission } from '../config/navigation';
 import { apiFetch, ApiError } from '../lib/api';
+import { PermissionGuard } from '../components/layout/PermissionGuard';
 import { FilterBar } from '../components/ui/FilterBar';
 import { ColumnDef, DataTable } from '../components/ui/DataTable';
 import { StatusBadge } from '../components/ui/StatusBadge';
 import { ConfirmModal } from '../components/ui/ConfirmModal';
 import { LoadingSkeleton } from '../components/ui/LoadingSkeleton';
 import { ErrorState } from '../components/ui/ErrorState';
+import { UserRole } from '../types/navigation';
 
 interface DepartmentItem {
   department_id: string;
@@ -26,7 +29,7 @@ interface EmployeeRow {
   annual_leave_balance: number;
   used_annual_leave: number;
   remaining_annual_leave: number;
-  role: 'employee' | 'manager' | 'hr';
+  role: UserRole;
   employment_status: 'active' | 'inactive' | 'terminated';
   email: string | null;
   phone: string | null;
@@ -68,7 +71,8 @@ const ROLE_LABEL: Record<string, string> = {
 
 export const EmployeesPage: React.FC = () => {
   const { user, showToast } = useAuth();
-  const isHr = user?.role === 'hr';
+  const canFilterAllDepts = hasAnyPermission(user, ['employee.read.all', 'employee.manage']);
+  const canManageSystemRoles = hasPermission(user, 'role.manage');
 
   const [departments, setDepartments] = useState<DepartmentItem[]>([]);
   const [items, setItems] = useState<EmployeeRow[]>([]);
@@ -104,20 +108,20 @@ export const EmployeesPage: React.FC = () => {
     try {
       const qs = new URLSearchParams();
       if (search.trim()) qs.set('search', search.trim());
-      if (isHr && deptFilter) qs.set('department_id', deptFilter);
+      if (canFilterAllDepts && deptFilter) qs.set('department_id', deptFilter);
       if (statusFilter !== 'all') qs.set('employment_status', statusFilter);
 
       const res = await apiFetch<{ total: number; can_edit: boolean; items: EmployeeRow[] }>(
         `/employees?${qs.toString()}`
       );
       setItems(res.items || []);
-      setCanEdit(Boolean(res.can_edit));
+      setCanEdit(Boolean(res.can_edit) && hasPermission(user, 'employee.manage'));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Không thể tải danh sách nhân viên.');
     } finally {
       setLoading(false);
     }
-  }, [search, isHr, deptFilter, statusFilter]);
+  }, [search, canFilterAllDepts, deptFilter, statusFilter, user]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -145,7 +149,7 @@ export const EmployeesPage: React.FC = () => {
       manager_id: emp.manager_id || '',
       start_date: emp.start_date,
       annual_leave_balance: emp.annual_leave_balance,
-      role: emp.role,
+      role: (emp.role === 'hr' || emp.role === 'manager' ? emp.role : 'employee'),
       email: emp.email || '',
       phone: emp.phone || '',
     });
@@ -275,35 +279,45 @@ export const EmployeesPage: React.FC = () => {
     columns.push({
       key: 'actions',
       header: 'Thao tác',
-      render: (r) => (
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              openEditModal(r);
-            }}
-            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-brand-border bg-white text-[11px] font-medium text-slate-700 hover:bg-slate-50"
-          >
-            <Pencil className="w-3 h-3" /> Sửa
-          </button>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              setToggleTarget(r);
-            }}
-            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-[11px] font-medium ${
-              r.employment_status === 'active'
-                ? 'border-red-200 bg-red-50 text-brand-red hover:bg-red-100'
-                : 'border-emerald-200 bg-emerald-50 text-brand-green hover:bg-emerald-100'
-            }`}
-          >
-            <Power className="w-3 h-3" />
-            {r.employment_status === 'active' ? 'Ngừng HĐ' : 'Kích hoạt'}
-          </button>
-        </div>
-      ),
+      render: (r) => {
+        const isProtectedAccount = (r.role === 'admin' || r.role === 'executive') && !canManageSystemRoles;
+        if (isProtectedAccount) {
+          return (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-100 text-[11px] text-slate-500 border border-slate-200">
+              <Lock className="w-3 h-3" /> Được bảo vệ
+            </span>
+          );
+        }
+        return (
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                openEditModal(r);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-brand-border bg-white text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+            >
+              <Pencil className="w-3 h-3" /> Sửa
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setToggleTarget(r);
+              }}
+              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-[11px] font-medium ${
+                r.employment_status === 'active'
+                  ? 'border-red-200 bg-red-50 text-brand-red hover:bg-red-100'
+                  : 'border-emerald-200 bg-emerald-50 text-brand-green hover:bg-emerald-100'
+              }`}
+            >
+              <Power className="w-3 h-3" />
+              {r.employment_status === 'active' ? 'Ngừng HĐ' : 'Kích hoạt'}
+            </button>
+          </div>
+        );
+      },
     });
   }
 
@@ -332,16 +346,18 @@ export const EmployeesPage: React.FC = () => {
           </div>
         </div>
 
-        {canEdit && (
-          <button
-            type="button"
-            onClick={openCreateModal}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-brand-blue text-white text-xs font-semibold hover:bg-blue-700"
-          >
-            <Plus className="w-4 h-4" />
-            Thêm nhân viên
-          </button>
-        )}
+        <PermissionGuard permission="employee.manage">
+          {canEdit && (
+            <button
+              type="button"
+              onClick={openCreateModal}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-brand-blue text-white text-xs font-semibold hover:bg-blue-700"
+            >
+              <Plus className="w-4 h-4" />
+              Thêm nhân viên
+            </button>
+          )}
+        </PermissionGuard>
       </div>
 
       {/* Filters */}
@@ -358,7 +374,7 @@ export const EmployeesPage: React.FC = () => {
           { value: 'inactive', label: 'Ngừng hoạt động' },
         ]}
         actions={
-          isHr ? (
+          canFilterAllDepts ? (
             <select
               aria-label="Lọc theo phòng ban"
               value={deptFilter}
