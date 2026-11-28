@@ -12,6 +12,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { getDefaultHomePath } from '../config/navigation';
 import { ApiError } from '../lib/api';
 import { LoginBrandingPanel, MobileBrandHeader } from '../components/auth/LoginBrandingPanel';
 import { DemoAccountsPanel } from '../components/auth/DemoAccountsPanel';
@@ -67,8 +68,8 @@ export const LoginPage: React.FC = () => {
 
     setSubmitting(true);
     try {
-      await login(email.trim(), password);
-      navigate('/dashboard', { replace: true });
+      const loggedUser = await login(email.trim(), password);
+      navigate(getDefaultHomePath(loggedUser), { replace: true });
     } catch (err) {
       setFormError(
         err instanceof ApiError
@@ -99,8 +100,8 @@ export const LoginPage: React.FC = () => {
     setDemoNotice(null);
     setSubmitting(true);
     try {
-      await login(demoEmail, devDemoPassword);
-      navigate('/dashboard', { replace: true });
+      const loggedUser = await login(demoEmail, devDemoPassword);
+      navigate(getDefaultHomePath(loggedUser), { replace: true });
     } catch (err) {
       setFormError(
         err instanceof ApiError

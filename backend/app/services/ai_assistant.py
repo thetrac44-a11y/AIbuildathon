@@ -8,7 +8,9 @@ from app.core.security import AuthenticatedUser
 from app.schemas.common import RoleEnum
 from app.services.ai_tools import (
     compare_department_metrics,
+    get_anomalies_by_department,
     get_attendance_summary,
+    get_attendance_trend,
     get_leave_balance,
     get_leave_by_department,
     get_top_late_employees,
@@ -81,6 +83,15 @@ def get_suggested_prompts(role: RoleEnum) -> List[str]:
             "Phòng tôi có cảnh báo bất thường nào tháng 10/2026?",
             "Ai còn dưới 10 ngày phép năm trong phòng tôi?",
         ]
+    if role == RoleEnum.executive:
+        return [
+            "Phòng ban nào có tỷ lệ đi muộn cao nhất?",
+            "Xu hướng chấm công 3 tháng gần đây thế nào?",
+            "Phòng nào có nhiều cảnh báo R1-R8 nhất?",
+            "Những vấn đề attendance nổi bật hiện tại là gì?",
+        ]
+    if role == RoleEnum.admin:
+        return []
     return [
         "Phòng nào có tỷ lệ đi muộn cao nhất tháng 10/2026?",
         "Liệt kê top 5 nhân viên đi muộn nhiều nhất tháng 10/2026",
@@ -153,6 +164,16 @@ def _extract_rule_code(question: str) -> Optional[str]:
     return m.group(1).upper() if m else None
 
 
+def _role_scope_label(role: RoleEnum) -> str:
+    if role in (RoleEnum.hr, RoleEnum.executive):
+        return "all"
+    if role == RoleEnum.manager:
+        return "department"
+    if role == RoleEnum.admin:
+        return "system"
+    return "self"
+
+
 def _log_audit(
     conn: sqlite3.Connection,
     user: AuthenticatedUser,
@@ -161,14 +182,35 @@ def _log_audit(
     sql_text: Optional[str],
     row_count: int,
     status: str,
+    query_type: Optional[str] = None,
 ) -> None:
     db_status = status if status in ("success", "blocked", "error", "insufficient_data") else "success"
+    scope = _role_scope_label(user.role)
+    success_flag = 1 if db_status == "success" else 0
+    resolved_qtype = query_type or (
+        "rbac_block"
+        if db_status == "blocked"
+        else ("ai_strategy" if user.role == RoleEnum.executive else "ai_sql")
+    )
     conn.execute(
         """
-        INSERT INTO query_audit_log (user_id, role, question, tool_name, sql_text, row_count, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO query_audit_log (
+            user_id, role, question, query_type, tool_name, sql_text, scope, row_count, success, status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (user.user_id, user.role.value, question[:1000], tool_name, sql_text, row_count, db_status),
+        (
+            user.user_id,
+            user.role.value,
+            question[:1000],
+            resolved_qtype,
+            tool_name,
+            sql_text,
+            scope,
+            row_count,
+            success_flag,
+            db_status,
+        ),
     )
     conn.commit()
 
@@ -180,6 +222,23 @@ def answer_question(
 ) -> Dict[str, Any]:
     q_clean = question.strip()
     q_lower = q_clean.lower()
+
+    # 0. Strict RBAC permission guard inside AI Orchestrator (defense-in-depth: Admin has NO HR AI access by default)
+    if user.role == RoleEnum.admin or not user.has_any_permission(
+        "ai.ask.self", "ai.ask.department", "ai.ask.all", "ai.strategy"
+    ):
+        answer = (
+            "Vai trò Quản trị hệ thống (Admin) không mặc định được cấp quyền truy vấn dữ liệu nghiệp vụ nhân sự qua Trợ lý AI."
+        )
+        _log_audit(conn, user, q_clean, "rbac_guard", None, 0, "blocked", query_type="rbac_block")
+        return {
+            "status": "blocked",
+            "answer": answer,
+            "table": None,
+            "chart": None,
+            "trace": {"tool_name": "rbac_guard", "sql_text": None, "row_count": 0, "execution_ms": 0.0},
+            "suggested_followups": [],
+        }
 
     # 1. Prompt Injection / Security Attack Guard
     for pattern in PROMPT_INJECTION_PATTERNS:
@@ -235,7 +294,7 @@ def answer_question(
                 "trace": {"tool_name": "rbac_guard", "sql_text": None, "row_count": 0, "execution_ms": 0.0},
                 "suggested_followups": get_suggested_prompts(user.role),
             }
-        if any(k in q_lower for k in ["phòng nào", "toàn công ty", "các phòng", "so sánh phòng", "top "]) or (
+        if any(k in q_lower for k in ["phòng nào", "phòng ban nào", "toàn công ty", "các phòng", "so sánh phòng", "top "]) or (
             mentioned_dept is not None
         ):
             answer = (
@@ -267,7 +326,7 @@ def answer_question(
                 "trace": {"tool_name": "rbac_guard", "sql_text": None, "row_count": 0, "execution_ms": 0.0},
                 "suggested_followups": get_suggested_prompts(user.role),
             }
-        if any(k in q_lower for k in ["toàn công ty", "phòng nào", "so sánh các phòng", "phòng khác"]):
+        if any(k in q_lower for k in ["toàn công ty", "phòng nào", "phòng ban nào", "so sánh các phòng", "phòng khác"]):
             answer = (
                 f"Vai trò Trưởng phòng {user.department_name} chỉ được phép tra cứu số liệu trong phạm vi "
                 f"phòng {user.department_name}, không được xem dữ liệu toàn công ty hoặc so sánh phòng ban khác."
@@ -304,10 +363,10 @@ def answer_question(
 
     # 4. Ambiguous / too-short / generic domain-only question check -> ask clarifying question (no SQL executed)
     domain_keywords = [
-        "đi muộn", "trễ", "chấm công", "giờ công", "nghỉ phép", "phép", "quỹ phép",
+        "đi muộn", "trễ", "chấm công", "attendance", "giờ công", "nghỉ phép", "phép", "quỹ phép",
         "cảnh báo", "bất thường", "thiếu chấm", "quên chấm", "cuối tuần", "trùng",
-        "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "so sánh", "phòng ban",
-        "nv0", "tổng hợp", "chuyên cần", "thống kê tháng",
+        "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "so sánh", "phòng ban", "phòng nào",
+        "nv0", "tổng hợp", "chuyên cần", "thống kê tháng", "xu hướng", "nổi bật", "3 tháng",
     ]
     generic_ambiguous_queries = {
         "chấm công", "nghỉ phép", "cảnh báo", "báo cáo", "bất thường",
@@ -345,6 +404,88 @@ def answer_question(
     target_emp = emp_codes[0] if emp_codes else None
 
     # 5. Deterministic Function Calling Routing (SQL computes 100% of numbers!)
+    q_type = "ai_strategy" if user.role == RoleEnum.executive else "ai_sql"
+
+    # Strategic Route S1: Multi-month attendance trend (e.g. "Xu hướng chấm công 3 tháng gần đây thế nào?")
+    if any(k in q_lower for k in ["xu hướng", "3 tháng", "nhiều tháng", "theo tháng", "gần đây"]) and any(
+        k in q_lower for k in ["chấm công", "attendance", "đi muộn", "đi làm", "tháng"]
+    ):
+        m_cnt = re.search(r"(\d+)\s*tháng", q_lower)
+        months = int(m_cnt.group(1)) if m_cnt else 3
+        res = get_attendance_trend(conn, user, months=months)
+        rows = res["rows"]
+        if not rows:
+            ans = "Không đủ dữ liệu chấm công để tổng hợp xu hướng theo tháng."
+            _log_audit(conn, user, q_clean, res["tool_name"], res["sql_text"], 0, "insufficient_data", query_type=q_type)
+            return _format_response("insufficient_data", ans, res, None, user.role)
+
+        lines = [
+            f"- Kỳ {r['period']}: {r['present_days']} ngày đi làm, {r['late_days']} lượt đi muộn ({r['late_rate_pct']}%), "
+            f"{r['leave_days']} ngày phép, {r['absent_days']} ngày vắng."
+            for r in rows
+        ]
+        ans = f"Xu hướng chấm công {len(rows)} tháng gần nhất trong phạm vi quyền của bạn:\n" + "\n".join(lines)
+        chart = {
+            "type": "bar",
+            "xKey": "period",
+            "yKey": "late_rate_pct",
+            "label": "Tỷ lệ đi muộn theo tháng (%)",
+            "data": rows,
+        }
+        _log_audit(conn, user, q_clean, res["tool_name"], res["sql_text"], len(rows), "success", query_type=q_type)
+        return _format_response("success", ans, res, chart, user.role)
+
+    # Strategic Route S2: Department ranking by R1-R8 anomalies ("Phòng nào có nhiều cảnh báo R1-R8 nhất?")
+    if (
+        any(k in q_lower for k in ["phòng nào", "phòng ban nào", "theo phòng", "nhiều cảnh báo"])
+        and any(k in q_lower for k in ["cảnh báo", "bất thường", "r1", "r8"])
+    ):
+        res = get_anomalies_by_department(conn, user, period=period)
+        rows = res["rows"]
+        if not rows:
+            ans = "Hiện chưa ghi nhận cảnh báo R1-R8 nào trong phạm vi của bạn."
+            _log_audit(conn, user, q_clean, res["tool_name"], res["sql_text"], 0, "insufficient_data", query_type=q_type)
+            return _format_response("insufficient_data", ans, res, None, user.role)
+
+        top = rows[0]
+        lines = [
+            f"- Phòng {r['department_name']}: {r['total_anomalies']} cảnh báo ({r['open_anomalies']} đang mở, {r['high_anomalies']} mức cao)"
+            for r in rows
+        ]
+        ans = (
+            f"Phòng {top['department_name']} hiện có nhiều cảnh báo R1-R8 nhất với {top['total_anomalies']} cảnh báo "
+            f"({top['open_anomalies']} đang mở, {top['high_anomalies']} mức cao):\n" + "\n".join(lines)
+        )
+        chart = {
+            "type": "bar",
+            "xKey": "department_name",
+            "yKey": "total_anomalies",
+            "label": "Số cảnh báo R1-R8 theo phòng ban",
+            "data": rows,
+        }
+        _log_audit(conn, user, q_clean, res["tool_name"], res["sql_text"], len(rows), "success", query_type=q_type)
+        return _format_response("success", ans, res, chart, user.role)
+
+    # Strategic Route S3: Notable attendance issues ("Những vấn đề attendance nổi bật hiện tại là gì?")
+    if any(k in q_lower for k in ["vấn đề", "nổi bật", "tổng quan rủi ro"]) and any(
+        k in q_lower for k in ["attendance", "chấm công", "hiện tại", "nổi bật"]
+    ):
+        res = list_anomalies_tool(conn, user, period=period, severity=severity, rule_code=rule_code)
+        rows = res["rows"]
+        if not rows:
+            ans = "Hiện tại chưa ghi nhận cảnh báo hay vấn đề chấm công nổi bật nào trong phạm vi của bạn."
+            _log_audit(conn, user, q_clean, res["tool_name"], res["sql_text"], 0, "insufficient_data", query_type=q_type)
+            return _format_response("insufficient_data", ans, res, None, user.role)
+        top_lines = [
+            f"- [{r['rule_code']} · Mức {r['severity']}] {r['target_code']} ({r['department_name']}, kỳ {r['period']}): {r['explanation']}"
+            for r in rows[:5]
+        ]
+        ans = (
+            f"Các vấn đề chấm công nổi bật hiện tại ({len(rows)} cảnh báo R1-R8 trong phạm vi):\n"
+            + "\n".join(top_lines)
+        )
+        _log_audit(conn, user, q_clean, res["tool_name"], res["sql_text"], len(rows), "success", query_type=q_type)
+        return _format_response("success", ans, res, None, user.role)
 
     # Route A: Anomalies / Cảnh báo bất thường / R1-R8 / Missing punch / Identical / Weekend / Cluster
     if any(
@@ -420,8 +561,8 @@ def answer_question(
         _log_audit(conn, user, q_clean, res["tool_name"], res["sql_text"], len(rows), "success")
         return _format_response("success", ans, res, None, user.role)
 
-    # Route C: Compare department metrics / Phòng nào đi muộn cao nhất
-    if any(k in q_lower for k in ["phòng nào", "so sánh", "theo phòng ban", "các phòng"]) and "nghỉ phép" not in q_lower:
+    # Route C: Compare department metrics / Phòng ban nào đi muộn cao nhất
+    if any(k in q_lower for k in ["phòng nào", "phòng ban nào", "so sánh", "theo phòng ban", "các phòng"]) and "nghỉ phép" not in q_lower:
         res = compare_department_metrics(conn, user, period=effective_period)
         rows = res["rows"]
         if not rows:

@@ -41,7 +41,17 @@ def _build_profile_response(conn: sqlite3.Connection, user: AuthenticatedUser) -
     remaining_days = max(0.0, round(user.annual_leave_balance - used_days, 2))
 
     screens = build_screens(settings.allow_manager_employee_read)
-    allowed_screens = [s.id for s in screens if user.role in s.allowed_roles]
+    user_perms = set(user.permissions)
+    allowed_screens = []
+    for s in screens:
+        if s.permission:
+            if s.permission in user_perms:
+                allowed_screens.append(s.id)
+        elif s.any_permissions:
+            if any(p in user_perms for p in s.any_permissions):
+                allowed_screens.append(s.id)
+        elif user.role in s.allowed_roles:
+            allowed_screens.append(s.id)
 
     return UserProfileResponse(
         user_id=user.user_id,
@@ -62,6 +72,7 @@ def _build_profile_response(conn: sqlite3.Connection, user: AuthenticatedUser) -
         email=user.email,
         phone=user.phone,
         must_change_password=user.must_change_password,
+        permissions=sorted(user_perms),
         allowed_screens=allowed_screens,
     )
 

@@ -5,8 +5,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
 
-from app.core.security import AuthenticatedUser, get_db_dependency, require_roles, write_activity_log
-from app.schemas.common import RoleEnum
+from app.core.security import AuthenticatedUser, get_db_dependency, require_permissions, write_activity_log
 from app.services.report_service import build_report, export_report_excel, export_report_pdf
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
@@ -16,7 +15,7 @@ router = APIRouter(prefix="/api/reports", tags=["reports"])
 def preview_report(
     period: str = Query(default="2026-10", pattern=r"^\d{4}-\d{2}$"),
     department_id: Optional[str] = Query(default=None),
-    current_user: AuthenticatedUser = Depends(require_roles(RoleEnum.manager, RoleEnum.hr)),
+    current_user: AuthenticatedUser = Depends(require_permissions("report.read.department", "report.read.all")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ) -> Dict[str, Any]:
     report = build_report(conn, period=period, user=current_user, department_id=department_id)
@@ -36,7 +35,7 @@ def preview_report(
 def download_report_excel(
     period: str = Query(default="2026-10", pattern=r"^\d{4}-\d{2}$"),
     department_id: Optional[str] = Query(default=None),
-    current_user: AuthenticatedUser = Depends(require_roles(RoleEnum.manager, RoleEnum.hr)),
+    current_user: AuthenticatedUser = Depends(require_permissions("report.read.department", "report.read.all")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
     report = build_report(conn, period=period, user=current_user, department_id=department_id)
@@ -62,7 +61,7 @@ def download_report_excel(
 def download_report_pdf(
     period: str = Query(default="2026-10", pattern=r"^\d{4}-\d{2}$"),
     department_id: Optional[str] = Query(default=None),
-    current_user: AuthenticatedUser = Depends(require_roles(RoleEnum.manager, RoleEnum.hr)),
+    current_user: AuthenticatedUser = Depends(require_permissions("report.read.department", "report.read.all")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
     report = build_report(conn, period=period, user=current_user, department_id=department_id)

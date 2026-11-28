@@ -1,12 +1,14 @@
 from enum import Enum
-from typing import List
-from pydantic import BaseModel
+from typing import List, Optional
+from pydantic import BaseModel, Field
 
 
 class RoleEnum(str, Enum):
     employee = "employee"
     manager = "manager"
     hr = "hr"
+    executive = "executive"
+    admin = "admin"
 
 
 class HealthResponse(BaseModel):
@@ -23,6 +25,8 @@ class NavigationScreen(BaseModel):
     title: str
     path: str
     group: str
+    permission: Optional[str] = None
+    any_permissions: List[str] = Field(default_factory=list)
     allowed_roles: List[RoleEnum]
 
 

@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS employees (
     manager_id TEXT NULL,
     start_date TEXT NOT NULL,
     annual_leave_balance REAL NOT NULL DEFAULT 12.0 CHECK (annual_leave_balance >= 0),
-    role TEXT NOT NULL CHECK (role IN ('employee', 'manager', 'hr')),
+    role TEXT NOT NULL CHECK (role IN ('employee', 'manager', 'hr', 'executive', 'admin')),
     employment_status TEXT NOT NULL DEFAULT 'active' CHECK (employment_status IN ('active', 'inactive', 'terminated')),
     email TEXT UNIQUE,
     phone TEXT NULL,
@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS leave_requests (
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'cancelled')),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
     -- Extended approval tracking fields (Mo rong da chot)
+    requires_executive_approval INTEGER NOT NULL DEFAULT 0 CHECK (requires_executive_approval IN (0, 1)),
     reviewed_by TEXT NULL,
     reviewed_at TEXT NULL,
     decision_note TEXT NULL,
@@ -99,11 +100,14 @@ CREATE TABLE IF NOT EXISTS query_audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     asked_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
     user_id TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('employee', 'manager', 'hr')),
+    role TEXT NOT NULL CHECK (role IN ('employee', 'manager', 'hr', 'executive', 'admin')),
     question TEXT NOT NULL,
+    query_type TEXT NOT NULL DEFAULT 'ai_sql',
     tool_name TEXT NULL,
     sql_text TEXT NULL,
+    scope TEXT NOT NULL DEFAULT 'self',
     row_count INTEGER NOT NULL DEFAULT 0,
+    success INTEGER NOT NULL DEFAULT 1 CHECK (success IN (0, 1)),
     status TEXT NOT NULL CHECK (status IN ('success', 'blocked', 'error', 'insufficient_data'))
 );
 
@@ -173,6 +177,100 @@ CREATE TABLE IF NOT EXISTS overtime_requests (
     UNIQUE (employee_id, work_date),
     FOREIGN KEY (employee_id) REFERENCES employees(employee_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     FOREIGN KEY (approved_by) REFERENCES employees(employee_id) ON UPDATE CASCADE ON DELETE SET NULL
+);
+
+-- =============================================================================
+-- 2B. RBAC 5-ROLE & TECHNICAL ADMIN TABLES (SYNCED WITH SUPABASE POSTGRESQL)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS roles (
+    role_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    role_code TEXT NOT NULL UNIQUE CHECK (role_code IN ('employee', 'manager', 'hr', 'executive', 'admin')),
+    role_name TEXT NOT NULL,
+    description TEXT NULL,
+    is_system_role INTEGER NOT NULL DEFAULT 1 CHECK (is_system_role IN (0, 1)),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS permissions (
+    permission_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    permission_code TEXT NOT NULL UNIQUE,
+    permission_name TEXT NOT NULL,
+    description TEXT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS user_roles (
+    user_id TEXT NOT NULL,
+    role_id INTEGER NOT NULL,
+    assigned_by_user_id TEXT NULL,
+    assigned_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+    PRIMARY KEY (user_id, role_id),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON UPDATE CASCADE ON DELETE CASCADE,
+    FOREIGN KEY (role_id) REFERENCES roles(role_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (assigned_by_user_id) REFERENCES users(user_id) ON UPDATE CASCADE ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS role_permissions (
+    role_id INTEGER NOT NULL,
+    permission_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+    PRIMARY KEY (role_id, permission_id),
+    FOREIGN KEY (role_id) REFERENCES roles(role_id) ON UPDATE CASCADE ON DELETE CASCADE,
+    FOREIGN KEY (permission_id) REFERENCES permissions(permission_id) ON UPDATE CASCADE ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS system_settings (
+    setting_key TEXT PRIMARY KEY,
+    category TEXT NOT NULL DEFAULT 'general',
+    setting_value TEXT NOT NULL,
+    value_type TEXT NOT NULL DEFAULT 'string',
+    description TEXT NULL,
+    updated_by_user_id TEXT NULL,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(user_id) ON UPDATE CASCADE ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS kiosk_devices (
+    kiosk_device_id TEXT PRIMARY KEY,
+    device_name TEXT NOT NULL,
+    location_name TEXT NULL,
+    branch_name TEXT NULL,
+    assigned_user_id TEXT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+    last_seen_at TEXT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+    FOREIGN KEY (assigned_user_id) REFERENCES users(user_id) ON UPDATE CASCADE ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS company_documents (
+    document_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    original_file_name TEXT NOT NULL,
+    storage_bucket TEXT NOT NULL DEFAULT 'hr-documents',
+    storage_path TEXT NOT NULL UNIQUE,
+    document_type TEXT NOT NULL DEFAULT 'policy',
+    version_label TEXT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('processing', 'active', 'archived', 'failed')),
+    checksum_sha256 TEXT NULL,
+    uploaded_by_user_id TEXT NULL,
+    uploaded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+    processed_at TEXT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY (uploaded_by_user_id) REFERENCES users(user_id) ON UPDATE CASCADE ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS document_chunks (
+    chunk_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL,
+    chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+    content TEXT NOT NULL,
+    embedding_model TEXT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+    UNIQUE (document_id, chunk_index),
+    FOREIGN KEY (document_id) REFERENCES company_documents(document_id) ON UPDATE CASCADE ON DELETE CASCADE
 );
 
 -- =============================================================================
@@ -285,6 +383,7 @@ SELECT
     CAST(julianday(lr.to_date) - julianday(lr.from_date) + 1 AS INTEGER) AS leave_days,
     lr.reason,
     lr.status,
+    lr.requires_executive_approval,
     lr.reviewed_by,
     lr.reviewed_at,
     lr.decision_note,

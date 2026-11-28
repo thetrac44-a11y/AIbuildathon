@@ -27,6 +27,7 @@ class UserProfileResponse(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     must_change_password: bool = False
+    permissions: List[str] = []
     allowed_screens: List[str] = []
 
 
@@ -77,6 +78,7 @@ class AccountCreateRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=120)
     employee_id: str
     password: str = Field(..., min_length=6, max_length=128)
+    role: Optional[RoleEnum] = None
     must_change_password: bool = True
 
 

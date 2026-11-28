@@ -11,6 +11,7 @@ import {
   Users,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { hasPermission } from '../config/navigation';
 import { apiDownload, apiFetch, ApiError } from '../lib/api';
 import { KpiCard } from '../components/ui/KpiCard';
 import { ColumnDef, DataTable } from '../components/ui/DataTable';
@@ -97,7 +98,7 @@ interface ReportPreviewData {
 
 export const ReportsPage: React.FC = () => {
   const { user, selectedPeriod, showToast } = useAuth();
-  const isHr = user?.role === 'hr';
+  const canFilterAllDepts = hasPermission(user, 'report.read.all');
 
   const [departments, setDepartments] = useState<DepartmentOption[]>([]);
   const [selectedDept, setSelectedDept] = useState<string>('');
@@ -107,20 +108,20 @@ export const ReportsPage: React.FC = () => {
   const [exporting, setExporting] = useState<'pdf' | 'excel' | null>(null);
 
   useEffect(() => {
-    if (!isHr) return;
+    if (!canFilterAllDepts) return;
     apiFetch<{ items: DepartmentOption[] }>('/departments')
       .then((res) => setDepartments(res.items || []))
       .catch(() => {
         // Ignore non-critical department list error
       });
-  }, [isHr]);
+  }, [canFilterAllDepts]);
 
   const loadReport = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const qs = new URLSearchParams({ period: selectedPeriod });
-      if (isHr && selectedDept) {
+      if (canFilterAllDepts && selectedDept) {
         qs.set('department_id', selectedDept);
       }
       const data = await apiFetch<ReportPreviewData>(`/reports/preview?${qs.toString()}`);
@@ -130,7 +131,7 @@ export const ReportsPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [selectedPeriod, isHr, selectedDept]);
+  }, [selectedPeriod, canFilterAllDepts, selectedDept]);
 
   useEffect(() => {
     loadReport();
@@ -140,7 +141,7 @@ export const ReportsPage: React.FC = () => {
     setExporting(format);
     try {
       const qs = new URLSearchParams({ period: selectedPeriod });
-      if (isHr && selectedDept) {
+      if (canFilterAllDepts && selectedDept) {
         qs.set('department_id', selectedDept);
       }
       const ext = format === 'pdf' ? 'pdf' : 'xlsx';
@@ -250,7 +251,7 @@ export const ReportsPage: React.FC = () => {
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
-          {isHr && (
+          {canFilterAllDepts && (
             <select
               aria-label="Lọc phòng ban báo cáo"
               value={selectedDept}

@@ -11,6 +11,14 @@ import {
   UploadCloud,
   Users,
   ShieldCheck,
+  BarChart3,
+  ServerCog,
+  KeyRound,
+  ScrollText,
+  BookOpen,
+  Settings,
+  Camera,
+  SlidersHorizontal,
   Menu,
   X,
   Bell,
@@ -21,11 +29,17 @@ import {
   AlertCircle,
   Info,
 } from 'lucide-react';
-import { getVisibleNavGroups, SITEMAP_SCREENS } from '../../config/navigation';
+import {
+  getDataScopeLabel,
+  getScreenTitle,
+  getVisibleNavGroups,
+  hasAnyPermission,
+  SITEMAP_SCREENS,
+} from '../../config/navigation';
 import { AVAILABLE_PERIODS, useAuth } from '../../context/AuthContext';
-import { NavItem } from '../../types/navigation';
+import { NavIconName } from '../../types/navigation';
 
-const iconMap: Record<NavItem['iconName'], React.ReactNode> = {
+const iconMap: Record<NavIconName, React.ReactNode> = {
   LayoutDashboard: <LayoutDashboard className="w-4 h-4 shrink-0" />,
   Clock: <Clock className="w-4 h-4 shrink-0" />,
   CalendarDays: <CalendarDays className="w-4 h-4 shrink-0" />,
@@ -36,6 +50,14 @@ const iconMap: Record<NavItem['iconName'], React.ReactNode> = {
   UploadCloud: <UploadCloud className="w-4 h-4 shrink-0" />,
   Users: <Users className="w-4 h-4 shrink-0" />,
   ShieldCheck: <ShieldCheck className="w-4 h-4 shrink-0" />,
+  BarChart3: <BarChart3 className="w-4 h-4 shrink-0" />,
+  ServerCog: <ServerCog className="w-4 h-4 shrink-0" />,
+  KeyRound: <KeyRound className="w-4 h-4 shrink-0" />,
+  ScrollText: <ScrollText className="w-4 h-4 shrink-0" />,
+  BookOpen: <BookOpen className="w-4 h-4 shrink-0" />,
+  Settings: <Settings className="w-4 h-4 shrink-0" />,
+  Camera: <Camera className="w-4 h-4 shrink-0" />,
+  SlidersHorizontal: <SlidersHorizontal className="w-4 h-4 shrink-0" />,
 };
 
 export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -46,10 +68,16 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
 
   if (!user) return null;
 
-  const visibleGroups = getVisibleNavGroups(user.role);
-  const currentScreen = SITEMAP_SCREENS.find((s) => location.pathname.startsWith(s.path));
-  const pageTitle = currentScreen?.title ?? 'Tổng quan';
-  const showPeriodFilter = currentScreen?.syncPeriodFilter ?? true;
+  const visibleGroups = getVisibleNavGroups(user);
+  // Match longest path first so /admin/kiosk/config matches before /admin/kiosk
+  const currentScreen = [...SITEMAP_SCREENS]
+    .sort((a, b) => b.path.length - a.path.length)
+    .find((s) => location.pathname === s.path || location.pathname.startsWith(`${s.path}/`));
+  const pageTitle = currentScreen ? getScreenTitle(currentScreen, user.role) : 'Tổng quan';
+  const showPeriodFilter = currentScreen?.syncPeriodFilter ?? false;
+  const canViewAnomalies = hasAnyPermission(user, ['anomaly.read.self', 'anomaly.read.department', 'anomaly.read.all']);
+  const canViewAudit = hasAnyPermission(user, ['audit.read', 'audit.read.business']);
+  const dataScopeText = getDataScopeLabel(user.role);
 
   const renderSidebarContent = (isMobile = false) => (
     <div className="flex flex-col h-full bg-brand-navy text-white">
@@ -98,13 +126,14 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
             )}
             <ul className="space-y-1">
               {items.map((item) => {
+                const label = getScreenTitle(item, user.role);
                 const isActive = location.pathname === item.path;
                 return (
                   <li key={item.id}>
                     <Link
                       to={item.path}
                       onClick={() => setMobileDrawerOpen(false)}
-                      title={sidebarCollapsed && !isMobile ? item.title : undefined}
+                      title={sidebarCollapsed && !isMobile ? label : undefined}
                       className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-medium transition-colors ${
                         isActive
                           ? 'bg-brand-blue text-white shadow-sm'
@@ -112,7 +141,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
                       }`}
                     >
                       {iconMap[item.iconName]}
-                      {(!sidebarCollapsed || isMobile) && <span className="truncate">{item.title}</span>}
+                      {(!sidebarCollapsed || isMobile) && <span className="truncate">{label}</span>}
                     </Link>
                   </li>
                 );
@@ -183,13 +212,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               <h1 className="text-lg font-bold text-slate-900 truncate">{pageTitle}</h1>
               <p className="text-[11px] text-slate-500 truncate">
                 Phạm vi dữ liệu:{' '}
-                <strong className="text-slate-700">
-                  {user.role === 'hr'
-                    ? 'Toàn công ty'
-                    : user.role === 'manager'
-                      ? `Phòng ${user.department_name}`
-                      : `Cá nhân (${user.employee_id})`}
-                </strong>
+                <strong className="text-slate-700">{dataScopeText}</strong>
               </p>
             </div>
           </div>
@@ -209,13 +232,23 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
                 ))}
               </select>
             )}
-            <Link
-              to="/anomalies"
-              aria-label="Cảnh báo bất thường"
-              className="p-2 rounded-lg border border-brand-border bg-white text-slate-600 hover:bg-brand-bg relative"
-            >
-              <Bell className="w-4 h-4" />
-            </Link>
+            {canViewAnomalies ? (
+              <Link
+                to="/anomalies"
+                aria-label="Cảnh báo bất thường"
+                className="p-2 rounded-lg border border-brand-border bg-white text-slate-600 hover:bg-brand-bg relative"
+              >
+                <Bell className="w-4 h-4" />
+              </Link>
+            ) : canViewAudit ? (
+              <Link
+                to="/admin/audit"
+                aria-label="Nhật ký kiểm toán"
+                className="p-2 rounded-lg border border-brand-border bg-white text-slate-600 hover:bg-brand-bg relative"
+              >
+                <ScrollText className="w-4 h-4" />
+              </Link>
+            ) : null}
             <Link
               to="/profile"
               className="w-8 h-8 rounded-full bg-brand-blue/15 text-brand-blue font-bold text-xs flex items-center justify-center hover:bg-brand-blue/25"

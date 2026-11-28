@@ -21,6 +21,7 @@ export interface AuthUser {
   email?: string | null;
   phone?: string | null;
   must_change_password: boolean;
+  permissions?: string[];
   allowed_screens: string[];
 }
 
@@ -44,7 +45,7 @@ interface AuthContextValue {
   isLoadingAuth: boolean;
   selectedPeriod: string;
   setSelectedPeriod: (period: string) => void;
-  login: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string) => Promise<AuthUser>;
   logout: () => Promise<void>;
   refreshProfile: () => Promise<void>;
   toasts: ToastMessage[];
@@ -105,7 +106,7 @@ export const AuthProvider: React.FC<{
   }, [initialTestUser, refreshProfile]);
 
   const login = useCallback(
-    async (username: string, password: string) => {
+    async (username: string, password: string): Promise<AuthUser> => {
       const res = await apiFetch<{ access_token: string; user: AuthUser }>('/auth/login', {
         method: 'POST',
         body: JSON.stringify({ username, password }),
@@ -113,6 +114,7 @@ export const AuthProvider: React.FC<{
       setStoredToken(res.access_token);
       setUser(res.user);
       showToast(`Xin chào ${res.user.full_name} (${res.user.role.toUpperCase()})`, 'success');
+      return res.user;
     },
     [showToast]
   );

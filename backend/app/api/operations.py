@@ -13,11 +13,17 @@ from app.core.security import (
     build_scope_filter,
     get_current_user,
     get_db_dependency,
+    require_permissions,
     require_roles,
     write_activity_log,
 )
 from app.schemas.common import RoleEnum
-from app.schemas.operations import ImportConfirmRequest, LeaveCreateRequest, LeaveReviewRequest
+from app.schemas.operations import (
+    AttendanceAdjustRequest,
+    ImportConfirmRequest,
+    LeaveCreateRequest,
+    LeaveReviewRequest,
+)
 from app.services.import_service import (
     ImportConflictError,
     confirm_staged_import,
@@ -45,7 +51,9 @@ def list_attendance(
     search: Optional[str] = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=200),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(
+        require_permissions("attendance.read.self", "attendance.read.department", "attendance.read.all")
+    ),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ) -> Dict[str, Any]:
     effective_dept = assert_department_access(current_user, department_id)
@@ -54,7 +62,7 @@ def list_attendance(
     where_clauses = [scope_sql]
     params: List[Any] = [*scope_params]
 
-    if effective_dept and current_user.role == RoleEnum.hr:
+    if effective_dept and current_user.role in (RoleEnum.hr, RoleEnum.executive):
         where_clauses.append("department_id = ?")
         params.append(effective_dept)
     if period:
@@ -113,7 +121,9 @@ def list_attendance(
 @router.get("/attendance/{record_id}")
 def get_attendance_detail(
     record_id: int,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(
+        require_permissions("attendance.read.self", "attendance.read.department", "attendance.read.all")
+    ),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
     row = conn.execute("SELECT * FROM v_attendance_daily WHERE id = ?", (record_id,)).fetchone()
@@ -121,6 +131,47 @@ def get_attendance_detail(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy bản ghi chấm công.")
     assert_employee_access(conn, current_user, row["employee_id"])
     return dict(row)
+
+
+@router.patch("/attendance/{record_id}")
+def adjust_attendance_record(
+    record_id: int,
+    payload: AttendanceAdjustRequest,
+    current_user: AuthenticatedUser = Depends(require_permissions("attendance.adjust")),
+    conn: sqlite3.Connection = Depends(get_db_dependency),
+):
+    """Business HR attendance adjustment with mandatory reason & audit log (blocked for Executive/Admin/Manager/Employee)."""
+    existing = conn.execute("SELECT * FROM attendance WHERE id = ?", (record_id,)).fetchone()
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy bản ghi chấm công.")
+
+    before_obj = dict(existing)
+    updates: Dict[str, Any] = {}
+    if payload.check_in is not None:
+        updates["check_in"] = payload.check_in
+    if payload.check_out is not None:
+        updates["check_out"] = payload.check_out
+    if payload.status is not None:
+        updates["status"] = payload.status
+    if not updates:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cần cung cấp ít nhất một trường điều chỉnh.")
+
+    updates["source"] = "hr_adjusted"
+    set_clauses = [f"{col} = ?" for col in updates.keys()]
+    conn.execute(f"UPDATE attendance SET {', '.join(set_clauses)} WHERE id = ?", [*updates.values(), record_id])
+
+    after_row = conn.execute("SELECT * FROM v_attendance_daily WHERE id = ?", (record_id,)).fetchone()
+    write_activity_log(
+        conn,
+        actor_user_id=current_user.user_id,
+        action="adjust_attendance",
+        entity_type="attendance",
+        entity_id=str(record_id),
+        before_obj=before_obj,
+        after_obj={**updates, "reason": payload.reason.strip()},
+    )
+    conn.commit()
+    return {"status": "ok", "record": dict(after_row)}
 
 
 # =============================================================================
@@ -146,14 +197,29 @@ def _get_annual_leave_balance_info(conn: sqlite3.Connection, employee_id: str) -
     }
 
 
+def _is_executive_approval_enabled(conn: sqlite3.Connection) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT setting_value FROM system_settings WHERE setting_key = 'workflow.executive_approval_enabled'"
+        ).fetchone()
+        if row is not None:
+            return str(row["setting_value"]).strip().lower() in ("true", "1", "yes", "on")
+    except Exception:
+        pass
+    return True
+
+
 @router.get("/leaves")
 def list_leaves(
     status_filter: Optional[str] = Query(default="all", alias="status"),
     leave_type: Optional[str] = Query(default="all"),
     period: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
     department_id: Optional[str] = Query(default=None),
+    requires_executive_approval: Optional[bool] = Query(default=None),
     search: Optional[str] = Query(default=None),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(
+        require_permissions("leave.read.self", "leave.read.department", "leave.read.all")
+    ),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ) -> Dict[str, Any]:
     effective_dept = assert_department_access(current_user, department_id)
@@ -161,7 +227,7 @@ def list_leaves(
 
     base_clauses = [scope_sql]
     base_params: List[Any] = [*scope_params]
-    if effective_dept and current_user.role == RoleEnum.hr:
+    if effective_dept and current_user.role in (RoleEnum.hr, RoleEnum.executive):
         base_clauses.append("v.department_id = ?")
         base_params.append(effective_dept)
     base_where = " AND ".join(base_clauses)
@@ -204,6 +270,9 @@ def list_leaves(
     if period:
         where_clauses.append("v.period = ?")
         params.append(period)
+    if requires_executive_approval is not None:
+        where_clauses.append("v.requires_executive_approval = ?")
+        params.append(1 if requires_executive_approval else 0)
     if search and current_user.role != RoleEnum.employee:
         like = f"%{search.strip()}%"
         where_clauses.append("(v.employee_id LIKE ? OR v.full_name LIKE ? OR v.reason LIKE ?)")
@@ -220,23 +289,34 @@ def list_leaves(
         params,
     ).fetchall()
 
+    exec_approval_enabled = _is_executive_approval_enabled(conn)
     items = []
     for r in rows:
         item = dict(r)
-        # BUG-07: Sync UI can_review strictly with POST /api/leaves/{id}/review rules
+        item["requires_executive_approval"] = bool(item.get("requires_executive_approval", 0))
+        # Sync UI can_review strictly with POST /api/leaves/{id}/review rules across all 5 roles
         can_review = False
-        if item["status"] == "pending":
-            if current_user.role == RoleEnum.hr and item["employee_id"] != current_user.employee_id:
+        if item["status"] == "pending" and item["employee_id"] != current_user.employee_id:
+            if current_user.has_permission("leave.approve.all"):
                 can_review = True
             elif (
-                current_user.role == RoleEnum.manager
+                current_user.has_permission("leave.approve.department")
                 and item["department_id"] == current_user.department_id
-                and item["employee_id"] != current_user.employee_id
                 and item["requester_role"] == "employee"
             ):
                 can_review = True
+            elif (
+                current_user.has_permission("leave.approve.executive")
+                and exec_approval_enabled
+                and item["requires_executive_approval"]
+            ):
+                can_review = True
         item["can_review"] = can_review
-        item["can_cancel"] = item["status"] == "pending" and item["employee_id"] == current_user.employee_id
+        item["can_cancel"] = (
+            item["status"] == "pending"
+            and item["employee_id"] == current_user.employee_id
+            and current_user.has_permission("leave.create.self")
+        )
         items.append(item)
 
     return {
@@ -256,7 +336,9 @@ def list_leaves(
 @router.get("/leaves/{request_id}")
 def get_leave_detail(
     request_id: int,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(
+        require_permissions("leave.read.self", "leave.read.department", "leave.read.all")
+    ),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
     row = conn.execute("SELECT * FROM v_leave_requests WHERE request_id = ?", (request_id,)).fetchone()
@@ -281,7 +363,7 @@ def get_leave_detail(
 @router.post("/leaves", status_code=status.HTTP_201_CREATED)
 def create_leave_request(
     payload: LeaveCreateRequest,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_permissions("leave.create.self")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
     try:
@@ -320,12 +402,13 @@ def create_leave_request(
                 detail=f"Số ngày phép năm còn lại ({bal['remaining_annual_leave']} ngày) không đủ cho đơn {requested_days} ngày.",
             )
 
+    req_exec_flag = 1 if payload.requires_executive_approval else 0
     cur = conn.execute(
         """
-        INSERT INTO leave_requests (employee_id, leave_type, from_date, to_date, reason, status)
-        VALUES (?, ?, ?, ?, ?, 'pending')
+        INSERT INTO leave_requests (employee_id, leave_type, from_date, to_date, reason, status, requires_executive_approval)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?)
         """,
-        (current_user.employee_id, payload.leave_type, payload.from_date, payload.to_date, payload.reason.strip()),
+        (current_user.employee_id, payload.leave_type, payload.from_date, payload.to_date, payload.reason.strip(), req_exec_flag),
     )
     req_id = cur.lastrowid
 
@@ -352,7 +435,7 @@ def create_leave_request(
 @router.post("/leaves/{request_id}/cancel")
 def cancel_leave_request(
     request_id: int,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_permissions("leave.create.self")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
     row = conn.execute("SELECT * FROM leave_requests WHERE request_id = ?", (request_id,)).fetchone()
@@ -389,7 +472,9 @@ def cancel_leave_request(
 def review_leave_request(
     request_id: int,
     payload: LeaveReviewRequest,
-    current_user: AuthenticatedUser = Depends(require_roles(RoleEnum.manager, RoleEnum.hr)),
+    current_user: AuthenticatedUser = Depends(
+        require_permissions("leave.approve.department", "leave.approve.all", "leave.approve.executive")
+    ),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
     row = conn.execute(
@@ -423,6 +508,22 @@ def review_leave_request(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Đơn nghỉ phép của cấp quản lý cần được bộ phận Nhân sự (HR) phê duyệt.",
             )
+    elif current_user.role == RoleEnum.executive:
+        if not _is_executive_approval_enabled(conn):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Chức năng phê duyệt cấp điều hành hiện đang tắt trong cấu hình hệ thống.",
+            )
+        if not bool(row["requires_executive_approval"]):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Cấp lãnh đạo chỉ được phê duyệt các đơn được đánh dấu yêu cầu phê duyệt cấp cao (requires_executive_approval = true).",
+            )
+    elif not current_user.has_permission("leave.approve.all"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bạn không có quyền phê duyệt đơn nghỉ phép này.",
+        )
 
     if row["status"] != "pending":
         raise HTTPException(
@@ -506,7 +607,7 @@ def review_leave_request(
 @router.get("/imports/template/{data_type}")
 def download_import_template(
     data_type: str,
-    current_user: AuthenticatedUser = Depends(require_roles(RoleEnum.hr)),
+    current_user: AuthenticatedUser = Depends(require_permissions("import.manage")),
 ):
     try:
         content = generate_template_xlsx(data_type)
@@ -523,7 +624,7 @@ def download_import_template(
 async def preview_import(
     data_type: str = Form(...),
     file: UploadFile = File(...),
-    current_user: AuthenticatedUser = Depends(require_roles(RoleEnum.hr)),
+    current_user: AuthenticatedUser = Depends(require_permissions("import.manage")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
     raw_bytes = await file.read()
@@ -543,7 +644,7 @@ async def preview_import(
 @router.get("/imports/errors/{batch_id}")
 def download_import_errors(
     batch_id: str,
-    current_user: AuthenticatedUser = Depends(require_roles(RoleEnum.hr)),
+    current_user: AuthenticatedUser = Depends(require_permissions("import.manage")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
     try:
@@ -563,7 +664,7 @@ def download_import_errors(
 def confirm_import(
     batch_id: str,
     payload: ImportConfirmRequest,
-    current_user: AuthenticatedUser = Depends(require_roles(RoleEnum.hr)),
+    current_user: AuthenticatedUser = Depends(require_permissions("import.manage")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
     try:
@@ -587,7 +688,7 @@ def confirm_import(
 
 @router.get("/imports/logs")
 def list_import_logs(
-    current_user: AuthenticatedUser = Depends(require_roles(RoleEnum.hr)),
+    current_user: AuthenticatedUser = Depends(require_permissions("import.manage")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
     ensure_import_logs_columns(conn)
@@ -615,7 +716,7 @@ def list_import_logs(
 @router.get("/imports/logs/{log_id}")
 def get_import_log_detail_endpoint(
     log_id: int,
-    current_user: AuthenticatedUser = Depends(require_roles(RoleEnum.hr)),
+    current_user: AuthenticatedUser = Depends(require_permissions("import.manage")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
     try:

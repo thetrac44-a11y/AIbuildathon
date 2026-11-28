@@ -8,7 +8,11 @@ router = APIRouter(prefix="/api")
 
 
 def build_screens(allow_manager_employee_read: bool = True) -> List[NavigationScreen]:
-    employee_mgmt_roles = [RoleEnum.hr, RoleEnum.manager] if allow_manager_employee_read else [RoleEnum.hr]
+    employee_mgmt_roles = (
+        [RoleEnum.hr, RoleEnum.manager, RoleEnum.executive]
+        if allow_manager_employee_read
+        else [RoleEnum.hr, RoleEnum.executive]
+    )
     return [
         NavigationScreen(
             id="dashboard",
@@ -16,7 +20,8 @@ def build_screens(allow_manager_employee_read: bool = True) -> List[NavigationSc
             title="Tổng quan",
             path="/dashboard",
             group="Không gian làm việc",
-            allowed_roles=[RoleEnum.employee, RoleEnum.manager, RoleEnum.hr],
+            any_permissions=["dashboard.self", "dashboard.department", "dashboard.all", "dashboard.executive"],
+            allowed_roles=[RoleEnum.employee, RoleEnum.manager, RoleEnum.hr, RoleEnum.executive],
         ),
         NavigationScreen(
             id="attendance",
@@ -24,7 +29,8 @@ def build_screens(allow_manager_employee_read: bool = True) -> List[NavigationSc
             title="Chấm công",
             path="/attendance",
             group="Không gian làm việc",
-            allowed_roles=[RoleEnum.employee, RoleEnum.manager, RoleEnum.hr],
+            any_permissions=["attendance.read.self", "attendance.read.department", "attendance.read.all"],
+            allowed_roles=[RoleEnum.employee, RoleEnum.manager, RoleEnum.hr, RoleEnum.executive],
         ),
         NavigationScreen(
             id="leaves",
@@ -32,7 +38,8 @@ def build_screens(allow_manager_employee_read: bool = True) -> List[NavigationSc
             title="Đơn nghỉ phép",
             path="/leaves",
             group="Không gian làm việc",
-            allowed_roles=[RoleEnum.employee, RoleEnum.manager, RoleEnum.hr],
+            any_permissions=["leave.read.self", "leave.read.department", "leave.read.all"],
+            allowed_roles=[RoleEnum.employee, RoleEnum.manager, RoleEnum.hr, RoleEnum.executive],
         ),
         NavigationScreen(
             id="anomalies",
@@ -40,7 +47,8 @@ def build_screens(allow_manager_employee_read: bool = True) -> List[NavigationSc
             title="Cảnh báo bất thường",
             path="/anomalies",
             group="Không gian làm việc",
-            allowed_roles=[RoleEnum.employee, RoleEnum.manager, RoleEnum.hr],
+            any_permissions=["anomaly.read.self", "anomaly.read.department", "anomaly.read.all"],
+            allowed_roles=[RoleEnum.employee, RoleEnum.manager, RoleEnum.hr, RoleEnum.executive],
         ),
         NavigationScreen(
             id="assistant",
@@ -48,7 +56,8 @@ def build_screens(allow_manager_employee_read: bool = True) -> List[NavigationSc
             title="Hỏi đáp AI",
             path="/assistant",
             group="Không gian làm việc",
-            allowed_roles=[RoleEnum.employee, RoleEnum.manager, RoleEnum.hr],
+            any_permissions=["ai.ask.self", "ai.ask.department", "ai.ask.all", "ai.strategy"],
+            allowed_roles=[RoleEnum.employee, RoleEnum.manager, RoleEnum.hr, RoleEnum.executive],
         ),
         NavigationScreen(
             id="reports",
@@ -56,7 +65,8 @@ def build_screens(allow_manager_employee_read: bool = True) -> List[NavigationSc
             title="Báo cáo",
             path="/reports",
             group="Không gian làm việc",
-            allowed_roles=[RoleEnum.manager, RoleEnum.hr],
+            any_permissions=["report.read.department", "report.read.all"],
+            allowed_roles=[RoleEnum.manager, RoleEnum.hr, RoleEnum.executive],
         ),
         NavigationScreen(
             id="profile",
@@ -64,7 +74,8 @@ def build_screens(allow_manager_employee_read: bool = True) -> List[NavigationSc
             title="Hồ sơ cá nhân",
             path="/profile",
             group="Cá nhân",
-            allowed_roles=[RoleEnum.employee, RoleEnum.manager, RoleEnum.hr],
+            permission="profile.read.self",
+            allowed_roles=[RoleEnum.employee, RoleEnum.manager, RoleEnum.hr, RoleEnum.executive, RoleEnum.admin],
         ),
         NavigationScreen(
             id="import",
@@ -72,6 +83,7 @@ def build_screens(allow_manager_employee_read: bool = True) -> List[NavigationSc
             title="Nhập dữ liệu",
             path="/admin/import",
             group="Quản trị nhân sự",
+            permission="import.manage",
             allowed_roles=[RoleEnum.hr],
         ),
         NavigationScreen(
@@ -80,6 +92,7 @@ def build_screens(allow_manager_employee_read: bool = True) -> List[NavigationSc
             title="Quản lý nhân viên",
             path="/admin/employees",
             group="Quản trị nhân sự",
+            any_permissions=["employee.read.department", "employee.read.all", "employee.manage"],
             allowed_roles=employee_mgmt_roles,
         ),
         NavigationScreen(
@@ -87,8 +100,63 @@ def build_screens(allow_manager_employee_read: bool = True) -> List[NavigationSc
             code="10",
             title="Quản lý tài khoản",
             path="/admin/accounts",
-            group="Quản trị nhân sự",
-            allowed_roles=[RoleEnum.hr],
+            group="Quản trị",
+            any_permissions=["account.manage", "account.manage.business"],
+            allowed_roles=[RoleEnum.admin, RoleEnum.hr],
+        ),
+        NavigationScreen(
+            id="system_dashboard",
+            code="11",
+            title="System Dashboard",
+            path="/admin/system",
+            group="Quản trị hệ thống",
+            permission="system.dashboard",
+            allowed_roles=[RoleEnum.admin],
+        ),
+        NavigationScreen(
+            id="rbac",
+            code="12",
+            title="Phân quyền",
+            path="/admin/rbac",
+            group="Quản trị",
+            permission="role.manage",
+            allowed_roles=[RoleEnum.admin],
+        ),
+        NavigationScreen(
+            id="audit",
+            code="13",
+            title="Nhật ký kiểm toán",
+            path="/admin/audit",
+            group="Quản trị",
+            any_permissions=["audit.read", "audit.read.business"],
+            allowed_roles=[RoleEnum.admin, RoleEnum.hr],
+        ),
+        NavigationScreen(
+            id="rag",
+            code="14",
+            title="Kho tài liệu RAG",
+            path="/admin/rag",
+            group="AI",
+            permission="rag.manage",
+            allowed_roles=[RoleEnum.admin, RoleEnum.hr],
+        ),
+        NavigationScreen(
+            id="system_config",
+            code="15",
+            title="Cấu hình hệ thống",
+            path="/admin/config",
+            group="Quản trị",
+            permission="system.manage",
+            allowed_roles=[RoleEnum.admin],
+        ),
+        NavigationScreen(
+            id="kiosk",
+            code="16",
+            title="Face Kiosk",
+            path="/admin/kiosk",
+            group="Face Kiosk",
+            permission="kiosk.manage",
+            allowed_roles=[RoleEnum.admin],
         ),
     ]
 
@@ -109,6 +177,6 @@ def get_sitemap() -> SitemapResponse:
     screens = build_screens(settings.allow_manager_employee_read)
     return SitemapResponse(
         total_screens=len(screens),
-        roles=[RoleEnum.employee, RoleEnum.manager, RoleEnum.hr],
+        roles=[RoleEnum.employee, RoleEnum.manager, RoleEnum.hr, RoleEnum.executive, RoleEnum.admin],
         screens=screens,
     )

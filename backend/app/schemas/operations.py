@@ -7,11 +7,19 @@ class LeaveCreateRequest(BaseModel):
     from_date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
     to_date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
     reason: str = Field(..., min_length=3, max_length=500)
+    requires_executive_approval: bool = False
 
 
 class LeaveReviewRequest(BaseModel):
     decision: str = Field(..., pattern="^(approved|rejected)$")
     decision_note: Optional[str] = Field(default=None, max_length=500)
+
+
+class AttendanceAdjustRequest(BaseModel):
+    check_in: Optional[str] = None
+    check_out: Optional[str] = None
+    status: Optional[str] = Field(default=None, pattern="^(present|absent|on_leave|holiday|weekend)$")
+    reason: str = Field(..., min_length=3, max_length=500)
 
 
 class ImportConfirmRequest(BaseModel):

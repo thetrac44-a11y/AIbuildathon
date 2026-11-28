@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
-from app.core.security import AuthenticatedUser, get_current_user, get_db_dependency
+from app.core.security import AuthenticatedUser, get_db_dependency, require_permissions
 from app.services.ai_assistant import answer_question, get_suggested_prompts
 
 router = APIRouter(prefix="/api/assistant", tags=["ai-assistant"])
@@ -18,7 +18,9 @@ class AskRequest(BaseModel):
 @router.post("/ask")
 def ask_assistant(
     payload: AskRequest,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(
+        require_permissions("ai.ask.self", "ai.ask.department", "ai.ask.all", "ai.strategy")
+    ),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ) -> Dict[str, Any]:
     return answer_question(conn, current_user, payload.question)
@@ -26,7 +28,9 @@ def ask_assistant(
 
 @router.get("/suggestions")
 def list_suggestions(
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(
+        require_permissions("ai.ask.self", "ai.ask.department", "ai.ask.all", "ai.strategy")
+    ),
 ) -> Dict[str, Any]:
     return {
         "role": current_user.role.value,
@@ -37,7 +41,9 @@ def list_suggestions(
 @router.get("/history")
 def list_my_chat_history(
     limit: int = Query(default=30, ge=1, le=100),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(
+        require_permissions("ai.ask.self", "ai.ask.department", "ai.ask.all", "ai.strategy")
+    ),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ) -> Dict[str, Any]:
     """Chat history is strictly isolated to the authenticated user_id to prevent cross-user leakage."""

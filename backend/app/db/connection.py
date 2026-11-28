@@ -36,6 +36,10 @@ _AUTO_PK_BY_TABLE: Dict[str, str] = {
     "notifications": "notification_id",
     "face_consent_records": "consent_id",
     "face_scan_logs": "id",
+    "roles": "role_id",
+    "permissions": "permission_id",
+    "company_documents": "document_id",
+    "document_chunks": "chunk_id",
 }
 
 

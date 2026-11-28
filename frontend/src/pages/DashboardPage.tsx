@@ -14,6 +14,7 @@ import {
 } from 'recharts';
 import { Users, Clock, AlertTriangle, CalendarDays, RefreshCw } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { hasPermission } from '../config/navigation';
 import { apiFetch, ApiError } from '../lib/api';
 import { KpiCard } from '../components/ui/KpiCard';
 import { StatusBadge } from '../components/ui/StatusBadge';
@@ -37,6 +38,7 @@ interface DashboardSummary {
     missing_punch_days: number;
     pending_leaves: number;
     pending_leaves_in_period?: number;
+    executive_pending_leaves?: number;
     open_anomalies: number;
     high_anomalies: number;
     remaining_annual_leave: number;
@@ -49,8 +51,21 @@ interface DashboardSummary {
     present_days: number;
     late_days: number;
     leave_days: number;
+    absent_days?: number;
     leave_rate: number;
     late_rate: number;
+    open_anomalies?: number;
+    total_anomalies?: number;
+  }[];
+  monthly_trend?: {
+    period: string;
+    present_days: number;
+    late_days: number;
+    leave_days: number;
+    absent_days: number;
+    late_rate: number;
+    on_time_rate: number;
+    leave_rate: number;
   }[];
   top_alerts: {
     anomaly_id: number;
@@ -91,20 +106,23 @@ export const DashboardPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const canFilterDepartments = hasPermission(user, 'dashboard.all');
+  const isExecutive = hasPermission(user, 'dashboard.executive');
+
   useEffect(() => {
-    if (user?.role === 'hr') {
+    if (canFilterDepartments) {
       apiFetch<{ items: { department_id: string; name: string }[] }>('/departments')
         .then((res) => setDepartments(res.items))
         .catch(() => {});
     }
-  }, [user?.role]);
+  }, [canFilterDepartments]);
 
   const fetchSummary = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const qs = new URLSearchParams({ period: selectedPeriod });
-      if (user?.role === 'hr' && selectedDept) {
+      if (canFilterDepartments && selectedDept) {
         qs.set('department_id', selectedDept);
       }
       const res = await apiFetch<DashboardSummary>(`/dashboard/summary?${qs.toString()}`);
@@ -114,7 +132,7 @@ export const DashboardPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [selectedPeriod, selectedDept, user?.role]);
+  }, [selectedPeriod, selectedDept, canFilterDepartments]);
 
   useEffect(() => {
     fetchSummary();
@@ -139,16 +157,18 @@ export const DashboardPage: React.FC = () => {
           <h2 className="text-sm font-semibold text-slate-700">
             {isEmployee
               ? `Tổng quan cá nhân – ${user.full_name} (${user.employee_id})`
-              : user.role === 'manager'
-                ? `Tổng quan Phòng ${user.department_name}`
-                : 'Tổng quan Chấm công & Nhân sự Toàn công ty'}
+              : isExecutive
+                ? 'Tổng quan điều hành – Toàn công ty'
+                : user.role === 'manager'
+                  ? `Tổng quan Phòng ${user.department_name}`
+                  : 'Tổng quan Chấm công & Nhân sự Toàn công ty'}
           </h2>
           <p className="text-xs text-slate-500">
             Số liệu được tính trực tiếp bằng SQL/Python cho kỳ {selectedPeriod}.
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {user.role === 'hr' && (
+          {canFilterDepartments && (
             <select
               aria-label="Lọc theo phòng ban"
               value={selectedDept}
@@ -224,7 +244,7 @@ export const DashboardPage: React.FC = () => {
             tooltip="Số nhân viên đang hoạt động trong phạm vi"
             tone="blue"
             icon={<Users className="w-5 h-5" />}
-            onClick={() => navigate('/admin/employees')}
+            onClick={() => navigate(isExecutive ? '/executive/departments' : '/admin/employees')}
           />
           <KpiCard
             title="Tổng giờ công"
@@ -233,16 +253,16 @@ export const DashboardPage: React.FC = () => {
             tooltip="Tổng giờ công làm việc thực tế trong kỳ đã chọn"
             tone="teal"
             icon={<Clock className="w-5 h-5" />}
-            onClick={() => navigate('/attendance')}
+            onClick={() => navigate(isExecutive ? '/reports' : '/attendance')}
           />
           <KpiCard
             title="Tỷ lệ đi muộn"
             value={`${k.late_rate}%`}
-            subtitle={`${k.late_days} lượt · ${k.leave_days} ngày phép`}
+            subtitle={`${k.late_days} lượt · ${k.absent_days} ngày vắng`}
             tooltip="Số lượt đi muộn (>5 phút) / Tổng ngày đi làm"
             tone="amber"
             icon={<CalendarDays className="w-5 h-5" />}
-            onClick={() => navigate('/attendance')}
+            onClick={() => navigate(isExecutive ? '/executive/departments' : '/attendance')}
           />
           <KpiCard
             title="Cảnh báo bất thường mở"
@@ -254,9 +274,13 @@ export const DashboardPage: React.FC = () => {
             onClick={() => navigate('/anomalies')}
           />
           <KpiCard
-            title="Đơn nghỉ phép chờ duyệt"
-            value={k.pending_leaves}
-            subtitle={`Trong kỳ ${selectedPeriod}: ${k.pending_leaves_in_period ?? 0} đơn`}
+            title={isExecutive ? 'Đơn cần BGĐ phê duyệt' : 'Đơn nghỉ phép chờ duyệt'}
+            value={isExecutive ? (k.executive_pending_leaves ?? 0) : k.pending_leaves}
+            subtitle={
+              isExecutive
+                ? `Tổng đơn chờ duyệt công ty: ${k.pending_leaves}`
+                : `Trong kỳ ${selectedPeriod}: ${k.pending_leaves_in_period ?? 0} đơn`
+            }
             tooltip="Tổng số đơn nghỉ phép đang ở trạng thái Chờ duyệt cần xử lý trong phạm vi"
             tone="green"
             icon={<CalendarDays className="w-5 h-5" />}
@@ -421,6 +445,39 @@ export const DashboardPage: React.FC = () => {
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Executive Multi-Month Attendance Trend */}
+      {!isEmployee && data.monthly_trend && data.monthly_trend.length > 1 && (
+        <div className="rounded-card border border-brand-border bg-white p-5 shadow-sm">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">Xu hướng chấm công theo tháng</h3>
+              <p className="text-xs text-slate-500">So sánh tỷ lệ đi muộn (%) và tỷ lệ nghỉ phép (%) qua các kỳ</p>
+            </div>
+            {isExecutive && (
+              <button
+                type="button"
+                onClick={() => navigate('/executive/departments')}
+                className="text-xs font-semibold text-brand-blue hover:underline"
+              >
+                Phân tích chi tiết phòng ban →
+              </button>
+            )}
+          </div>
+          <div className="h-56 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={data.monthly_trend}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#E4EAF2" />
+                <XAxis dataKey="period" tick={{ fontSize: 11, fill: '#475569' }} />
+                <YAxis tick={{ fontSize: 11, fill: '#475569' }} unit="%" />
+                <Tooltip />
+                <Bar dataKey="late_rate" name="Tỷ lệ đi muộn (%)" fill="#2563EB" radius={[5, 5, 0, 0]} />
+                <Bar dataKey="leave_rate" name="Tỷ lệ nghỉ phép (%)" fill="#0F9D9A" radius={[5, 5, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
           </div>
         </div>
       )}

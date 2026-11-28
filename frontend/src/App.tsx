@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { getDefaultHomePath } from './config/navigation';
 import { AppShell } from './components/layout/AppShell';
 import { RouteGuard } from './components/layout/RouteGuard';
 import { LoadingSkeleton } from './components/ui/LoadingSkeleton';
@@ -15,6 +16,13 @@ import { ProfilePage } from './pages/ProfilePage';
 import { ImportPage } from './pages/ImportPage';
 import { EmployeesPage } from './pages/EmployeesPage';
 import { AccountsPage } from './pages/AccountsPage';
+import { DepartmentAnalyticsPage } from './pages/DepartmentAnalyticsPage';
+import { SystemDashboardPage } from './pages/SystemDashboardPage';
+import { RbacManagementPage } from './pages/RbacManagementPage';
+import { AuditLogsPage } from './pages/AuditLogsPage';
+import { RagKnowledgePage } from './pages/RagKnowledgePage';
+import { SystemConfigPage } from './pages/SystemConfigPage';
+import { KioskDevicesPage } from './pages/KioskDevicesPage';
 
 export const AppRoutes: React.FC = () => {
   const { user, isLoadingAuth } = useAuth();
@@ -33,15 +41,25 @@ export const AppRoutes: React.FC = () => {
     return <LoginPage />;
   }
 
+  const defaultHome = getDefaultHomePath(user);
+
   return (
     <AppShell>
       <Routes>
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/" element={<Navigate to={defaultHome} replace />} />
         <Route
           path="/dashboard"
           element={
             <RouteGuard screenId="dashboard">
               <DashboardPage />
+            </RouteGuard>
+          }
+        />
+        <Route
+          path="/executive/departments"
+          element={
+            <RouteGuard screenId="department_analytics">
+              <DepartmentAnalyticsPage />
             </RouteGuard>
           }
         />
@@ -125,7 +143,63 @@ export const AppRoutes: React.FC = () => {
             </RouteGuard>
           }
         />
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        <Route
+          path="/admin/system"
+          element={
+            <RouteGuard screenId="system_dashboard">
+              <SystemDashboardPage />
+            </RouteGuard>
+          }
+        />
+        <Route
+          path="/admin/rbac"
+          element={
+            <RouteGuard screenId="rbac">
+              <RbacManagementPage />
+            </RouteGuard>
+          }
+        />
+        <Route
+          path="/admin/audit"
+          element={
+            <RouteGuard screenId="audit">
+              <AuditLogsPage />
+            </RouteGuard>
+          }
+        />
+        <Route
+          path="/admin/rag"
+          element={
+            <RouteGuard screenId="rag">
+              <RagKnowledgePage />
+            </RouteGuard>
+          }
+        />
+        <Route
+          path="/admin/config"
+          element={
+            <RouteGuard screenId="system_config">
+              <SystemConfigPage />
+            </RouteGuard>
+          }
+        />
+        <Route
+          path="/admin/kiosk"
+          element={
+            <RouteGuard screenId="kiosk_devices">
+              <KioskDevicesPage initialTab="devices" />
+            </RouteGuard>
+          }
+        />
+        <Route
+          path="/admin/kiosk/config"
+          element={
+            <RouteGuard screenId="kiosk_config">
+              <KioskDevicesPage initialTab="config" />
+            </RouteGuard>
+          }
+        />
+        <Route path="*" element={<Navigate to={defaultHome} replace />} />
       </Routes>
     </AppShell>
   );

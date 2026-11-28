@@ -62,6 +62,8 @@ const ROLE_LABEL: Record<string, string> = {
   employee: 'Nhân viên',
   manager: 'Trưởng phòng',
   hr: 'HR',
+  executive: 'Cấp lãnh đạo',
+  admin: 'Quản trị hệ thống',
 };
 
 export const EmployeesPage: React.FC = () => {

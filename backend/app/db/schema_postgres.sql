@@ -158,16 +158,23 @@ INSERT INTO public.permissions (permission_code, permission_name, description)
 VALUES
     ('profile.read.self',          'Xem hồ sơ cá nhân',            'Xem hồ sơ của chính người dùng'),
     ('profile.update.self',        'Cập nhật hồ sơ cá nhân',       'Cập nhật thông tin được phép và đổi mật khẩu của bản thân'),
+    ('dashboard.self',             'Tổng quan cá nhân',            'Xem bảng điều khiển phạm vi cá nhân'),
+    ('dashboard.department',       'Tổng quan phòng ban',          'Xem bảng điều khiển phạm vi phòng ban'),
+    ('dashboard.all',              'Tổng quan toàn công ty',       'Xem bảng điều khiển chấm công toàn công ty'),
+    ('dashboard.executive',        'Tổng quan điều hành',          'Xem dashboard điều hành và phân tích so sánh phòng ban'),
+    ('system.dashboard',           'System Dashboard',             'Xem bảng điều khiển kỹ thuật, tài khoản và trạng thái hệ thống'),
     ('attendance.read.self',       'Xem chấm công cá nhân',        'Xem dữ liệu chấm công của bản thân'),
     ('attendance.read.department', 'Xem chấm công phòng ban',      'Xem dữ liệu chấm công trong phòng được quản lý'),
     ('attendance.read.all',        'Xem chấm công toàn công ty',   'Xem dữ liệu chấm công toàn công ty'),
     ('attendance.adjust',          'Điều chỉnh chấm công',         'Điều chỉnh công có lý do và nhật ký'),
+    ('attendance.face_checkin',    'Chấm công khuôn mặt',          'Thực hiện chấm công cá nhân qua nhận diện khuôn mặt'),
     ('leave.create.self',          'Tạo đơn nghỉ phép',            'Tạo và hủy đơn nghỉ phép cho bản thân'),
     ('leave.read.self',            'Xem đơn nghỉ phép cá nhân',    'Xem đơn nghỉ phép của bản thân'),
     ('leave.read.department',      'Xem đơn nghỉ phép phòng ban',  'Xem đơn nghỉ phép trong phòng'),
     ('leave.read.all',             'Xem đơn nghỉ phép toàn công ty','Xem đơn nghỉ phép toàn công ty'),
     ('leave.approve.department',   'Duyệt đơn phòng ban',          'Duyệt đơn nhân viên trong phạm vi phòng'),
     ('leave.approve.all',          'Duyệt đơn toàn công ty',       'Duyệt đơn toàn công ty và đơn cấp quản lý'),
+    ('leave.approve.executive',    'Phê duyệt cấp cao',            'Phê duyệt đơn được đánh dấu requires_executive_approval = true'),
     ('anomaly.read.self',          'Xem cảnh báo cá nhân',         'Xem cảnh báo bất thường cấp cá nhân của bản thân'),
     ('anomaly.read.department',    'Xem cảnh báo phòng ban',       'Xem cảnh báo trong phòng'),
     ('anomaly.read.all',           'Xem cảnh báo toàn công ty',    'Xem mọi cảnh báo bất thường'),
@@ -175,20 +182,24 @@ VALUES
     ('employee.read.department',   'Xem nhân viên phòng ban',      'Xem danh sách nhân viên trong phòng'),
     ('employee.read.all',          'Xem nhân viên toàn công ty',   'Xem danh sách nhân sự toàn công ty'),
     ('employee.manage',            'Quản lý nhân viên',            'Thêm, sửa và ngừng hoạt động hồ sơ nhân viên'),
-    ('account.manage',             'Quản lý tài khoản',            'Tạo, khóa và cập nhật tài khoản'),
-    ('role.manage',                'Quản lý vai trò và quyền',     'Gán vai trò và quyền hệ thống'),
+    ('account.manage',             'Quản lý tài khoản hệ thống',   'Tạo, khóa, mở khóa và gán mọi vai trò (5 roles)'),
+    ('account.manage.business',    'Quản lý tài khoản nghiệp vụ HR','Quản lý tài khoản nhóm nghiệp vụ (employee/manager/hr)'),
+    ('role.manage',                'Quản lý vai trò và quyền',     'Gán vai trò và cấu hình ma trận quyền hệ thống'),
     ('face.manage',                'Quản lý hồ sơ khuôn mặt',      'Đăng ký, cập nhật và thu hồi hồ sơ khuôn mặt'),
-    ('kiosk.manage',               'Quản lý kiosk',                'Quản lý thiết bị chấm công'),
+    ('kiosk.manage',               'Quản lý kiosk',                'Quản lý thiết bị và cấu hình Face Kiosk'),
     ('import.manage',              'Nhập dữ liệu',                 'Nhập dữ liệu Excel/CSV và xử lý trùng'),
     ('report.read.department',     'Xem báo cáo phòng ban',        'Xem và xuất báo cáo trong phòng'),
     ('report.read.all',            'Xem báo cáo toàn công ty',     'Xem và xuất báo cáo toàn công ty'),
     ('ai.ask.self',                'Hỏi đáp AI cá nhân',           'Hỏi đáp AI trong phạm vi dữ liệu bản thân và nội quy'),
     ('ai.ask.department',          'Hỏi đáp AI phòng ban',         'Hỏi đáp AI trong phạm vi phòng ban và nội quy'),
     ('ai.ask.all',                 'Hỏi đáp AI toàn công ty',      'Hỏi đáp AI toàn công ty và kho tri thức RAG'),
+    ('ai.strategy',                'Hỏi đáp AI chiến lược',        'Hỏi đáp AI phân tích điều hành toàn công ty'),
     ('policy.manage',              'Quản lý quy định',             'Tạo và cập nhật chính sách chấm công'),
-    ('document.manage',            'Quản lý tài liệu RAG',         'Tải lên và quản lý tài liệu nội bộ'),
-    ('audit.read',                 'Xem nhật ký kiểm toán',        'Xem nhật ký thao tác và truy vấn'),
-    ('system.manage',              'Quản trị hệ thống',            'Quản lý cấu hình hệ thống')
+    ('rag.manage',                 'Quản lý kho tài liệu RAG',     'Upload, xóa và re-index kho tri thức RAG'),
+    ('document.manage',            'Quản lý tài liệu nội bộ',      'Tải lên và quản lý tài liệu nội bộ'),
+    ('audit.read',                 'Xem nhật ký kiểm toán hệ thống','Xem toàn bộ activity logs và query audit logs'),
+    ('audit.read.business',        'Xem nhật ký nghiệp vụ HR',     'Xem nhật ký thao tác nghiệp vụ nhân sự'),
+    ('system.manage',              'Quản trị hệ thống',            'Quản lý cấu hình kỹ thuật hệ thống')
 ON CONFLICT (permission_code) DO NOTHING;
 
 WITH mapping(role_code, permission_code) AS (
@@ -196,7 +207,9 @@ WITH mapping(role_code, permission_code) AS (
       -- Employee
       ('employee', 'profile.read.self'),
       ('employee', 'profile.update.self'),
+      ('employee', 'dashboard.self'),
       ('employee', 'attendance.read.self'),
+      ('employee', 'attendance.face_checkin'),
       ('employee', 'leave.create.self'),
       ('employee', 'leave.read.self'),
       ('employee', 'anomaly.read.self'),
@@ -205,8 +218,10 @@ WITH mapping(role_code, permission_code) AS (
       -- Manager
       ('manager', 'profile.read.self'),
       ('manager', 'profile.update.self'),
+      ('manager', 'dashboard.department'),
       ('manager', 'attendance.read.self'),
       ('manager', 'attendance.read.department'),
+      ('manager', 'attendance.face_checkin'),
       ('manager', 'leave.create.self'),
       ('manager', 'leave.read.self'),
       ('manager', 'leave.read.department'),
@@ -218,11 +233,13 @@ WITH mapping(role_code, permission_code) AS (
       ('manager', 'report.read.department'),
       ('manager', 'ai.ask.department'),
 
-      -- HR
+      -- HR (Business Administration ONLY)
       ('hr', 'profile.read.self'),
       ('hr', 'profile.update.self'),
+      ('hr', 'dashboard.all'),
       ('hr', 'attendance.read.all'),
       ('hr', 'attendance.adjust'),
+      ('hr', 'attendance.face_checkin'),
       ('hr', 'leave.create.self'),
       ('hr', 'leave.read.all'),
       ('hr', 'leave.approve.all'),
@@ -230,37 +247,41 @@ WITH mapping(role_code, permission_code) AS (
       ('hr', 'anomaly.review'),
       ('hr', 'employee.read.all'),
       ('hr', 'employee.manage'),
-      ('hr', 'account.manage'),
+      ('hr', 'account.manage.business'),
       ('hr', 'face.manage'),
-      ('hr', 'kiosk.manage'),
       ('hr', 'import.manage'),
       ('hr', 'report.read.all'),
       ('hr', 'ai.ask.all'),
       ('hr', 'policy.manage'),
+      ('hr', 'rag.manage'),
       ('hr', 'document.manage'),
-      ('hr', 'audit.read'),
+      ('hr', 'audit.read.business'),
 
-      -- Admin
+      -- Admin (Technical Administration ONLY — NO default HR business data scope!)
       ('admin', 'profile.read.self'),
       ('admin', 'profile.update.self'),
-      ('admin', 'employee.read.all'),
+      ('admin', 'system.dashboard'),
       ('admin', 'account.manage'),
       ('admin', 'role.manage'),
       ('admin', 'kiosk.manage'),
+      ('admin', 'rag.manage'),
       ('admin', 'document.manage'),
-      ('admin', 'policy.manage'),
       ('admin', 'audit.read'),
       ('admin', 'system.manage'),
 
-      -- Executive (Ban Lãnh đạo - Executive Read-Only + Strategic AI)
+      -- Executive (Ban Lãnh đạo - Executive Read-Only + Strategic AI + Executive Approval)
       ('executive', 'profile.read.self'),
       ('executive', 'profile.update.self'),
+      ('executive', 'dashboard.all'),
+      ('executive', 'dashboard.executive'),
       ('executive', 'attendance.read.all'),
       ('executive', 'leave.read.all'),
+      ('executive', 'leave.approve.executive'),
       ('executive', 'anomaly.read.all'),
       ('executive', 'employee.read.all'),
       ('executive', 'report.read.all'),
-      ('executive', 'ai.ask.all')
+      ('executive', 'ai.ask.all'),
+      ('executive', 'ai.strategy')
 )
 INSERT INTO public.role_permissions (role_id, permission_id)
 SELECT r.role_id, p.permission_id
@@ -352,6 +373,8 @@ CREATE TABLE IF NOT EXISTS public.leave_requests (
     reason TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'approved', 'rejected', 'cancelled')),
+    requires_executive_approval SMALLINT NOT NULL DEFAULT 0
+        CHECK (requires_executive_approval IN (0, 1)),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     reviewed_by TEXT REFERENCES public.employees(employee_id)
         ON UPDATE CASCADE ON DELETE SET NULL,
@@ -430,12 +453,26 @@ CREATE TABLE IF NOT EXISTS public.query_audit_log (
         ON UPDATE CASCADE ON DELETE RESTRICT,
     role TEXT NOT NULL CHECK (role IN ('employee', 'manager', 'hr', 'admin', 'executive')),
     question TEXT NOT NULL,
+    query_type TEXT NOT NULL DEFAULT 'ai_sql',
     tool_name TEXT,
     sql_text TEXT,
+    scope TEXT NOT NULL DEFAULT 'self',
     row_count INTEGER NOT NULL DEFAULT 0 CHECK (row_count >= 0),
+    success SMALLINT NOT NULL DEFAULT 1 CHECK (success IN (0, 1)),
     status TEXT NOT NULL
         CHECK (status IN ('success', 'blocked', 'error', 'insufficient_data')),
     error_code TEXT
+);
+
+CREATE TABLE IF NOT EXISTS public.system_settings (
+    setting_key TEXT PRIMARY KEY,
+    category TEXT NOT NULL DEFAULT 'general',
+    setting_value TEXT NOT NULL,
+    value_type TEXT NOT NULL DEFAULT 'string',
+    description TEXT,
+    updated_by_user_id TEXT REFERENCES public.users(user_id)
+        ON UPDATE CASCADE ON DELETE SET NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS public.import_logs (
@@ -756,7 +793,8 @@ SELECT
     reviewer.full_name AS reviewer_name,
     lr.reviewed_at,
     lr.decision_note,
-    lr.created_at
+    lr.created_at,
+    lr.requires_executive_approval
 FROM public.leave_requests lr
 JOIN public.employees e ON e.employee_id = lr.employee_id
 JOIN public.departments d ON d.department_id = e.department_id

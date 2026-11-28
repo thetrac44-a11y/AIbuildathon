@@ -60,7 +60,7 @@ FORBIDDEN_IDENTIFIERS = {
     "roles", "permissions", "user_roles", "role_permissions",
     "attendance_policies", "notifications", "kiosk_devices",
     "face_profiles", "face_consent_records", "face_scan_logs",
-    "company_documents", "document_chunks",
+    "company_documents", "document_chunks", "system_settings",
     # Sensitive employee PII excluded from v_employees
     "email", "phone", "embedding_ciphertext", "device_secret_hash",
 }
@@ -151,8 +151,12 @@ def validate_readonly_sql(sql: str, max_rows: int = 200) -> str:
 
 
 def _create_scoped_temp_views(conn: Any, user: AuthenticatedUser) -> None:
-    """Create TEMP views shadowing the 4 allowlisted views with hard-coded RBAC scope for the authenticated user."""
-    if user.role == RoleEnum.hr:
+    """Create TEMP views shadowing the 4 allowlisted views with hard-coded 5-role RBAC scope."""
+    if user.role == RoleEnum.admin:
+        raise SQLGuardError(
+            "Vai trò Quản trị hệ thống (Admin) không mặc định có quyền truy vấn SQL dữ liệu nghiệp vụ nhân sự."
+        )
+    if user.role in (RoleEnum.hr, RoleEnum.executive):
         emp_cond = "1 = 1"
         att_cond = "1 = 1"
         leave_cond = "1 = 1"
@@ -186,6 +190,10 @@ def execute_guarded_sql(
     timeout_seconds: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], str, float]:
     """Validate and execute read-only SQL on RBAC-scoped TEMP views (supports both SQLite & Supabase PostgreSQL)."""
+    if user.role == RoleEnum.admin:
+        raise SQLGuardError(
+            "Vai trò Quản trị hệ thống (Admin) không mặc định có quyền truy vấn SQL dữ liệu nghiệp vụ nhân sự."
+        )
     limit = max_rows or settings.ai_query_max_rows
     timeout = timeout_seconds or float(settings.ai_query_timeout_seconds)
     validated_sql = validate_readonly_sql(sql, max_rows=limit)
@@ -227,7 +235,9 @@ def execute_guarded_sql(
         # Install SQLite authorizer blocking any write or access to sensitive tables
         forbidden_base_tables = {
             "users", "activity_logs", "query_audit_log", "import_logs",
-            "leave_approval_logs", "sqlite_master", "sqlite_schema", "sqlite_temp_master",
+            "leave_approval_logs", "system_settings", "roles", "permissions",
+            "user_roles", "role_permissions", "kiosk_devices",
+            "sqlite_master", "sqlite_schema", "sqlite_temp_master",
         }
 
         def authorizer(action_code, arg1, arg2, db_name, trigger_name):

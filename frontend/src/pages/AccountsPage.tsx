@@ -18,6 +18,8 @@ import { ConfirmModal } from '../components/ui/ConfirmModal';
 import { LoadingSkeleton } from '../components/ui/LoadingSkeleton';
 import { ErrorState } from '../components/ui/ErrorState';
 
+import { UserRole } from '../types/navigation';
+
 interface AccountRow {
   user_id: string;
   username: string;
@@ -25,7 +27,7 @@ interface AccountRow {
   full_name: string;
   department_id: string;
   department_name: string;
-  role: 'employee' | 'manager' | 'hr';
+  role: UserRole;
   is_active: number;
   employment_status: string;
   must_change_password: number;
@@ -55,7 +57,9 @@ interface AuditLogRow {
 const ROLE_LABELS: Record<string, string> = {
   employee: 'Nhân viên',
   manager: 'Trưởng phòng',
-  hr: 'HR (Quản trị)',
+  hr: 'Nhân sự (HR)',
+  executive: 'Cấp lãnh đạo',
+  admin: 'Quản trị hệ thống',
 };
 
 export const AccountsPage: React.FC = () => {
@@ -64,6 +68,8 @@ export const AccountsPage: React.FC = () => {
 
   // Accounts state
   const [accounts, setAccounts] = useState<AccountRow[]>([]);
+  const [assignableRoles, setAssignableRoles] = useState<UserRole[]>(['employee', 'manager', 'hr']);
+  const [canManageAllRoles, setCanManageAllRoles] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState<string>('');
@@ -81,13 +87,14 @@ export const AccountsPage: React.FC = () => {
     employee_id: '',
     username: '',
     password: '',
+    role: 'employee' as UserRole,
     must_change_password: true,
   });
   const [creating, setCreating] = useState<boolean>(false);
 
   // Edit role / reset password modal
   const [editTarget, setEditTarget] = useState<AccountRow | null>(null);
-  const [editRole, setEditRole] = useState<'employee' | 'manager' | 'hr'>('employee');
+  const [editRole, setEditRole] = useState<UserRole>('employee');
   const [resetPassword, setResetPassword] = useState<string>('');
   const [forceChange, setForceChange] = useState<boolean>(true);
   const [savingEdit, setSavingEdit] = useState<boolean>(false);
@@ -103,8 +110,16 @@ export const AccountsPage: React.FC = () => {
       const qs = new URLSearchParams();
       if (search.trim()) qs.set('search', search.trim());
       if (roleFilter !== 'all') qs.set('role', roleFilter);
-      const res = await apiFetch<{ items: AccountRow[] }>(`/accounts?${qs.toString()}`);
+      const res = await apiFetch<{
+        items: AccountRow[];
+        can_manage_all_roles?: boolean;
+        assignable_roles?: UserRole[];
+      }>(`/accounts?${qs.toString()}`);
       setAccounts(res.items || []);
+      setCanManageAllRoles(Boolean(res.can_manage_all_roles));
+      if (res.assignable_roles && res.assignable_roles.length > 0) {
+        setAssignableRoles(res.assignable_roles);
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Không thể tải danh sách tài khoản.');
     } finally {
@@ -140,9 +155,8 @@ export const AccountsPage: React.FC = () => {
   const openCreateModal = async () => {
     setCreateOpen(true);
     try {
-      const res = await apiFetch<{ items: EmployeeLite[] }>('/employees');
-      const existingEmpIds = new Set(accounts.map((a) => a.employee_id));
-      const available = (res.items || []).filter((e) => !existingEmpIds.has(e.employee_id));
+      const res = await apiFetch<{ items: EmployeeLite[] }>('/accounts/unlinked-employees');
+      const available = res.items || [];
       setEmployees(available);
       if (available.length > 0) {
         const first = available[0];
@@ -150,10 +164,11 @@ export const AccountsPage: React.FC = () => {
           employee_id: first.employee_id,
           username: `${first.employee_id.toLowerCase()}@company.vn`,
           password: '',
+          role: (first.role as UserRole) || 'employee',
           must_change_password: true,
         });
       } else {
-        setCreateForm({ employee_id: '', username: '', password: '', must_change_password: true });
+        setCreateForm({ employee_id: '', username: '', password: '', role: 'employee', must_change_password: true });
       }
     } catch {
       setEmployees([]);
@@ -267,7 +282,17 @@ export const AccountsPage: React.FC = () => {
       render: (r) => (
         <StatusBadge
           label={ROLE_LABELS[r.role] || r.role}
-          variant={r.role === 'hr' ? 'high' : r.role === 'manager' ? 'info' : 'dismissed'}
+          variant={
+            r.role === 'admin'
+              ? 'high'
+              : r.role === 'executive'
+                ? 'medium'
+                : r.role === 'hr'
+                  ? 'approved'
+                  : r.role === 'manager'
+                    ? 'info'
+                    : 'dismissed'
+          }
         />
       ),
     },
@@ -396,7 +421,7 @@ export const AccountsPage: React.FC = () => {
       <div className="rounded-lg border border-amber-200 bg-amber-50/60 px-4 py-2.5 flex items-center gap-2.5 text-xs text-amber-900">
         <ShieldAlert className="w-4 h-4 text-brand-amber shrink-0" />
         <span>
-          Quy tắc an toàn hệ thống: Backend tự động chặn mọi yêu cầu khóa hoặc hạ quyền tài khoản HR hoạt động cuối cùng và không lưu mật khẩu dạng rõ trong audit log.
+          Quy tắc an toàn hệ thống: Backend tự động chặn mọi yêu cầu khóa/hạ quyền tài khoản <strong>Admin cuối cùng</strong> hoặc <strong>HR cuối cùng</strong> còn hoạt động, và tách bạch quyền kỹ thuật khỏi nghiệp vụ HR.
         </span>
       </div>
 
@@ -411,7 +436,13 @@ export const AccountsPage: React.FC = () => {
             onSelectChange={setRoleFilter}
             selectOptions={[
               { value: 'all', label: 'Tất cả vai trò' },
-              { value: 'hr', label: 'HR (Quản trị)' },
+              ...(canManageAllRoles
+                ? [
+                    { value: 'admin', label: 'Quản trị hệ thống (Admin)' },
+                    { value: 'executive', label: 'Cấp lãnh đạo (Executive)' },
+                  ]
+                : []),
+              { value: 'hr', label: 'Nhân sự (HR)' },
               { value: 'manager', label: 'Trưởng phòng' },
               { value: 'employee', label: 'Nhân viên' },
             ]}
@@ -561,12 +592,14 @@ export const AccountsPage: React.FC = () => {
                 <label className="block font-medium text-slate-700 mb-1">Vai trò truy cập (RBAC)</label>
                 <select
                   value={editRole}
-                  onChange={(e) => setEditRole(e.target.value as 'employee' | 'manager' | 'hr')}
+                  onChange={(e) => setEditRole(e.target.value as UserRole)}
                   className="w-full px-3 py-2 rounded-lg border border-brand-border bg-white"
                 >
-                  <option value="employee">Nhân viên (Employee)</option>
-                  <option value="manager">Trưởng phòng (Manager)</option>
-                  <option value="hr">Nhân sự / Quản trị (HR)</option>
+                  {assignableRoles.map((rCode) => (
+                    <option key={rCode} value={rCode}>
+                      {ROLE_LABELS[rCode] || rCode} ({rCode})
+                    </option>
+                  ))}
                 </select>
               </div>
 

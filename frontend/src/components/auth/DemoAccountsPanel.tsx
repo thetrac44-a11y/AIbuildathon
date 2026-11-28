@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { ChevronDown, ChevronUp, ShieldCheck, UserCheck } from 'lucide-react';
 
 export interface DemoAccountOption {
-  roleLabel: 'HR Admin' | 'Manager' | 'Employee';
+  roleLabel: 'System Admin' | 'Executive' | 'HR Admin' | 'Manager' | 'Employee';
   badgeClass: string;
   username: string;
   employeeId: string;
@@ -11,25 +11,39 @@ export interface DemoAccountOption {
 
 export const DEV_DEMO_ACCOUNTS: DemoAccountOption[] = [
   {
+    roleLabel: 'System Admin',
+    badgeClass: 'bg-indigo-50 text-indigo-700 border-indigo-200',
+    username: 'admin@company.vn',
+    employeeId: 'NV080',
+    scopeDescription: 'Quản trị kỹ thuật (Tài khoản · RBAC · Audit · RAG · Kiosk)',
+  },
+  {
+    roleLabel: 'Executive',
+    badgeClass: 'bg-amber-50 text-amber-800 border-amber-200',
+    username: 'director@company.vn',
+    employeeId: 'NV079',
+    scopeDescription: 'Ban Điều hành (Toàn công ty · Phân tích · AI chiến lược)',
+  },
+  {
     roleLabel: 'HR Admin',
     badgeClass: 'bg-blue-50 text-brand-blue border-blue-200',
     username: 'hr@company.vn',
     employeeId: 'NV002',
-    scopeDescription: 'Toàn công ty (80 NV · Đủ 10 màn hình)',
+    scopeDescription: 'Nghiệp vụ HR toàn công ty (80 NV · Import · R1–R8)',
   },
   {
     roleLabel: 'Manager',
     badgeClass: 'bg-teal-50 text-brand-teal border-teal-200',
     username: 'manager.sales@company.vn',
     employeeId: 'NV001',
-    scopeDescription: 'Phòng Kinh doanh (16 NV · Duyệt & Báo cáo)',
+    scopeDescription: 'Phòng Kinh doanh (16 NV · Duyệt phép & Báo cáo phòng)',
   },
   {
     roleLabel: 'Employee',
     badgeClass: 'bg-slate-100 text-slate-700 border-slate-200',
     username: 'nv007@company.vn',
     employeeId: 'NV007',
-    scopeDescription: 'Phạm vi cá nhân (Kịch bản S1 · 6 màn hình)',
+    scopeDescription: 'Phạm vi cá nhân (Kịch bản S1 · Chấm công & Đơn phép)',
   },
 ];
 

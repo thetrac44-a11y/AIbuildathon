@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from fastapi import HTTPException, status
+
 from app.core.security import AuthenticatedUser, build_scope_filter
 from app.schemas.common import RoleEnum
 from app.services.sql_guard import execute_guarded_sql
@@ -36,7 +38,7 @@ def get_attendance_summary(
     scope_sql, params = build_scope_filter(user, "employee_id", "department_id")
     where_parts = [scope_sql, "period = ?"]
     params.append(period)
-    if department_name and user.role == RoleEnum.hr:
+    if department_name and user.role in (RoleEnum.hr, RoleEnum.executive):
         where_parts.append("LOWER(department_name) = LOWER(?)")
         params.append(department_name)
 
@@ -108,7 +110,7 @@ def get_top_late_employees(
     if period:
         where_parts.append("period = ?")
         params.append(period)
-    if department_name and user.role == RoleEnum.hr:
+    if department_name and user.role in (RoleEnum.hr, RoleEnum.executive):
         where_parts.append("LOWER(department_name) = LOWER(?)")
         params.append(department_name)
 
@@ -180,12 +182,17 @@ def list_anomalies_tool(
     severity: Optional[str] = None,
     rule_code: Optional[str] = None,
 ) -> Dict[str, Any]:
-    if user.role == RoleEnum.hr:
+    if user.role in (RoleEnum.hr, RoleEnum.executive):
         scope_sql, params = "1 = 1", []
     elif user.role == RoleEnum.manager:
         scope_sql, params = "department_id = ?", [user.department_id]
-    else:
+    elif user.role == RoleEnum.employee:
         scope_sql, params = "scope_type = 'employee' AND employee_id = ?", [user.employee_id]
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Quản trị hệ thống (Admin) không có quyền truy vấn cảnh báo nghiệp vụ R1-R8.",
+        )
 
     where_parts = [scope_sql]
     if period:
@@ -252,6 +259,82 @@ def compare_department_metrics(
     """
     res = _exec_tool_sql(conn, sql, params)
     res["tool_name"] = "compare_department_metrics"
+    return res
+
+
+def get_attendance_trend(
+    conn: sqlite3.Connection,
+    user: AuthenticatedUser,
+    months: int = 3,
+) -> Dict[str, Any]:
+    """Strategic multi-month attendance trend (RBAC-scoped; used by Executive, HR & Manager)."""
+    months = max(1, min(int(months), 12))
+    scope_sql, params = build_scope_filter(user, "employee_id", "department_id")
+    sql = f"""
+        SELECT
+            period,
+            COUNT(DISTINCT employee_id) AS employee_count,
+            ROUND(COALESCE(SUM(work_hours), 0), 1) AS total_work_hours,
+            SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) AS present_days,
+            SUM(CASE WHEN is_late = 1 THEN 1 ELSE 0 END) AS late_days,
+            SUM(CASE WHEN status = 'on_leave' THEN 1 ELSE 0 END) AS leave_days,
+            SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) AS absent_days,
+            ROUND(
+                CASE WHEN SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) > 0
+                     THEN SUM(CASE WHEN is_late = 1 THEN 1 ELSE 0 END) * 100.0 / SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END)
+                     ELSE 0.0 END,
+                2
+            ) AS late_rate_pct
+        FROM v_attendance_daily
+        WHERE {scope_sql}
+        GROUP BY period
+        ORDER BY period DESC
+        LIMIT ?
+    """
+    params.append(months)
+    res = _exec_tool_sql(conn, sql, params)
+    res["rows"] = list(reversed(res["rows"]))
+    res["tool_name"] = "get_attendance_trend"
+    return res
+
+
+def get_anomalies_by_department(
+    conn: sqlite3.Connection,
+    user: AuthenticatedUser,
+    period: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Rank departments by R1-R8 anomaly volume (RBAC-scoped; blocks Admin & Employee)."""
+    if user.role in (RoleEnum.hr, RoleEnum.executive):
+        scope_sql, params = "1 = 1", []
+    elif user.role == RoleEnum.manager:
+        scope_sql, params = "department_id = ?", [user.department_id]
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Vai trò hiện tại không có quyền xem thống kê cảnh báo theo phòng ban.",
+        )
+
+    where_parts = [scope_sql]
+    if period:
+        where_parts.append("period = ?")
+        params.append(period)
+
+    sql = f"""
+        SELECT
+            department_id,
+            department_name,
+            COUNT(*) AS total_anomalies,
+            SUM(CASE WHEN review_status = 'open' THEN 1 ELSE 0 END) AS open_anomalies,
+            SUM(CASE WHEN severity = 'high' THEN 1 ELSE 0 END) AS high_anomalies,
+            SUM(CASE WHEN severity = 'medium' THEN 1 ELSE 0 END) AS medium_anomalies
+        FROM v_anomalies
+        WHERE {' AND '.join(where_parts)}
+        GROUP BY department_id, department_name
+        ORDER BY total_anomalies DESC, high_anomalies DESC, department_name ASC
+        LIMIT 20
+    """
+    res = _exec_tool_sql(conn, sql, params)
+    res["tool_name"] = "get_anomalies_by_department"
     return res
 
 

@@ -67,7 +67,7 @@ def collect_metrics(
 
     where_parts = [scope_sql, "period = ?"]
     params: List[Any] = [*scope_params, period]
-    if effective_dept and user.role == RoleEnum.hr:
+    if effective_dept and user.role in (RoleEnum.hr, RoleEnum.executive):
         where_parts.append("department_id = ?")
         params.append(effective_dept)
     where_str = " AND ".join(where_parts)
@@ -168,7 +168,7 @@ def collect_metrics(
     # Anomalies in scope
     anom_clauses = [scope_sql, "period = ?"]
     anom_params: List[Any] = [*scope_params, period]
-    if effective_dept and user.role == RoleEnum.hr:
+    if effective_dept and user.role in (RoleEnum.hr, RoleEnum.executive):
         anom_clauses.append("department_id = ?")
         anom_params.append(effective_dept)
     anom_rows = conn.execute(

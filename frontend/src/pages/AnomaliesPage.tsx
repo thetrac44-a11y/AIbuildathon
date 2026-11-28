@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { RefreshCw, X, CheckCircle2, EyeOff } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { hasPermission } from '../config/navigation';
 import { apiFetch, ApiError } from '../lib/api';
 import { KpiCard } from '../components/ui/KpiCard';
 import { FilterBar } from '../components/ui/FilterBar';
@@ -296,7 +297,7 @@ export const AnomaliesPage: React.FC = () => {
               />
               Tất cả kỳ (6 tháng)
             </label>
-            {user?.role !== 'employee' && (
+            {hasPermission(user, 'anomaly.review') && (
               <button
                 type="button"
                 disabled={scanning}

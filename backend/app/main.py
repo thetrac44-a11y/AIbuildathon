@@ -4,6 +4,7 @@ from app.core.config import settings
 from app.api.routes import router as api_router
 from app.api.auth import router as auth_router
 from app.api.admin import router as admin_router
+from app.api.system_admin import router as system_admin_router
 from app.api.operations import router as operations_router
 from app.api.anomalies import router as anomalies_router
 from app.api.assistant import router as assistant_router
@@ -40,6 +41,7 @@ def create_app() -> FastAPI:
     application.include_router(api_router)
     application.include_router(auth_router)
     application.include_router(admin_router)
+    application.include_router(system_admin_router)
     application.include_router(operations_router)
     application.include_router(anomalies_router)
     application.include_router(assistant_router)

@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 import bcrypt
 
 from app.db.connection import get_connection, init_db
+from app.db.migrations import seed_rbac_and_system_defaults
 
 SEED_RANDOM = 2026
 DEV_DEFAULT_PASSWORD = os.getenv("DEV_SEED_PASSWORD", "Demo@123")
@@ -83,6 +84,14 @@ def seed_database(db_path: Optional[Path | str] = None, reset: bool = False) -> 
         if reset and existing_emp > 0:
             conn.execute("PRAGMA foreign_keys = OFF;")
             for table in [
+                "document_chunks",
+                "company_documents",
+                "kiosk_devices",
+                "system_settings",
+                "role_permissions",
+                "user_roles",
+                "permissions",
+                "roles",
                 "leave_approval_logs",
                 "activity_logs",
                 "import_logs",
@@ -177,8 +186,23 @@ def seed_database(db_path: Optional[Path | str] = None, reset: bool = False) -> 
                 start_date = f"{start_year:04d}-{start_month:02d}-{start_day:02d}"
                 email = f"{emp_id.lower()}@company.vn"
                 phone = f"0901{num:06d}"
+                role = "employee"
+                row_mgr_id: Optional[str] = mgr_id
+                # Seed Executive (NV079) and Technical Admin (NV080) after RNG draws so NV007..NV078 stay 100% identical
+                if emp_id == "NV079":
+                    full_name = "Trần Minh Quang"
+                    position = "Giám đốc Điều hành"
+                    row_mgr_id = None
+                    role = "executive"
+                    email = "director@company.vn"
+                elif emp_id == "NV080":
+                    full_name = "Nguyễn Hải Đăng"
+                    position = "Quản trị viên Hệ thống"
+                    row_mgr_id = None
+                    role = "admin"
+                    email = "admin@company.vn"
                 employees_rows.append(
-                    (emp_id, full_name, dept_id, position, mgr_id, start_date, 12.0, "employee", "active", email, phone)
+                    (emp_id, full_name, dept_id, position, row_mgr_id, start_date, 12.0, role, "active", email, phone)
                 )
 
         conn.executemany(
@@ -223,11 +247,24 @@ def seed_database(db_path: Optional[Path | str] = None, reset: bool = False) -> 
             status: str,
             reviewed_by: Optional[str],
             decision_note: Optional[str] = None,
+            requires_executive_approval: int = 0,
         ):
             created_at = f"{from_d} 09:00:00"
             reviewed_at = f"{from_d} 11:30:00" if status in ("approved", "rejected") else None
             leave_rows.append(
-                (emp_id, leave_type, from_d, to_d, reason, status, created_at, reviewed_by, reviewed_at, decision_note)
+                (
+                    emp_id,
+                    leave_type,
+                    from_d,
+                    to_d,
+                    reason,
+                    status,
+                    requires_executive_approval,
+                    created_at,
+                    reviewed_by,
+                    reviewed_at,
+                    decision_note,
+                )
             )
             if status == "approved":
                 s_dt = datetime.date.fromisoformat(from_d)
@@ -259,14 +296,24 @@ def seed_database(db_path: Optional[Path | str] = None, reset: bool = False) -> 
         add_leave("NV038", "sick", "2026-08-12", "2026-08-13", "Nghỉ ốm có giấy bác sĩ", "approved", "NV002", "Đã duyệt")
         add_leave("NV053", "annual", "2026-10-12", "2026-10-13", "Nghỉ phép năm", "approved", "NV004", "Đã duyệt")
         add_leave("NV067", "annual", "2026-11-05", "2026-11-06", "Nghỉ phép cá nhân", "approved", "NV005", "Đã duyệt")
-        add_leave("NV068", "personal", "2026-11-20", "2026-11-20", "Làm thủ tục hành chính", "pending", None, None)
+        add_leave(
+            "NV068",
+            "personal",
+            "2026-11-20",
+            "2026-11-20",
+            "Đề xuất nghỉ đặc biệt cần Ban Điều hành phê duyệt",
+            "pending",
+            None,
+            None,
+            requires_executive_approval=1,
+        )
 
         conn.executemany(
             """
             INSERT INTO leave_requests (
                 employee_id, leave_type, from_date, to_date, reason, status,
-                created_at, reviewed_by, reviewed_at, decision_note
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                requires_executive_approval, created_at, reviewed_by, reviewed_at, decision_note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             leave_rows,
         )
@@ -462,11 +509,14 @@ def seed_database(db_path: Optional[Path | str] = None, reset: bool = False) -> 
             attendance_rows,
         )
 
+        # Seed RBAC 5 roles, permissions, role_permissions, user_roles, system_settings, kiosk_devices & RAG docs
+        seed_rbac_and_system_defaults(conn, sync_strict_role_matrix=True)
+
         # Initial seed activity log
         conn.execute(
             """
             INSERT INTO activity_logs (actor_user_id, action, entity_type, entity_id, before_json, after_json)
-            VALUES ('USR002', 'seed_database', 'system', 'initial', NULL, '{"employees": 80, "departments": 5}')
+            VALUES ('USR080', 'seed_database', 'system', 'initial', NULL, '{"employees": 80, "departments": 5, "roles": 5}')
             """
         )
 

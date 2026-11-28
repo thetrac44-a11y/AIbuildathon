@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Plus, X, Check, Ban } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { hasPermission } from '../config/navigation';
 import { apiFetch, ApiError } from '../lib/api';
 import { KpiCard } from '../components/ui/KpiCard';
 import { FilterBar } from '../components/ui/FilterBar';
@@ -21,6 +22,7 @@ interface LeaveRow {
   leave_days: number;
   reason: string;
   status: 'pending' | 'approved' | 'rejected' | 'cancelled';
+  requires_executive_approval?: boolean;
   reviewed_by: string | null;
   decision_note: string | null;
   created_at: string;
@@ -73,8 +75,11 @@ const LEAVE_STATUS_VN: Record<string, { label: string; variant: BadgeVariant }> 
 
 export const LeavesPage: React.FC = () => {
   const { user, selectedPeriod, showToast } = useAuth();
+  const canCreateLeave = hasPermission(user, 'leave.create.self');
+  const isExecutiveApprover = hasPermission(user, 'leave.approve.executive');
   const [data, setData] = useState<LeavesResponse | null>(null);
-  const [filterAllPeriods, setFilterAllPeriods] = useState(false);
+  const [filterAllPeriods, setFilterAllPeriods] = useState(isExecutiveApprover);
+  const [onlyExecutiveApproval, setOnlyExecutiveApproval] = useState(isExecutiveApprover);
   const [statusFilter, setStatusFilter] = useState('all');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
@@ -101,6 +106,7 @@ export const LeavesPage: React.FC = () => {
     try {
       const qs = new URLSearchParams({ status: statusFilter });
       if (!filterAllPeriods) qs.set('period', selectedPeriod);
+      if (onlyExecutiveApproval) qs.set('requires_executive_approval', 'true');
       if (search.trim()) qs.set('search', search.trim());
       const res = await apiFetch<LeavesResponse>(`/leaves?${qs.toString()}`);
       setData(res);
@@ -109,7 +115,7 @@ export const LeavesPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, filterAllPeriods, selectedPeriod, search]);
+  }, [statusFilter, filterAllPeriods, onlyExecutiveApproval, selectedPeriod, search]);
 
   useEffect(() => {
     loadLeaves();
@@ -209,7 +215,14 @@ export const LeavesPage: React.FC = () => {
       header: 'Trạng thái',
       render: (r) => {
         const info = LEAVE_STATUS_VN[r.status] ?? { label: r.status, variant: 'info' as BadgeVariant };
-        return <StatusBadge label={info.label} variant={info.variant} />;
+        return (
+          <div className="flex flex-wrap items-center gap-1">
+            <StatusBadge label={info.label} variant={info.variant} />
+            {r.requires_executive_approval && (
+              <StatusBadge label="Cấp BGĐ" variant="high" />
+            )}
+          </div>
+        );
       },
     },
     {
@@ -297,6 +310,16 @@ export const LeavesPage: React.FC = () => {
         ]}
         actions={
           <div className="flex flex-wrap items-center gap-2.5">
+            {isExecutiveApprover && (
+              <label className="inline-flex items-center gap-1.5 text-xs font-medium text-brand-navy cursor-pointer px-2">
+                <input
+                  type="checkbox"
+                  checked={onlyExecutiveApproval}
+                  onChange={(e) => setOnlyExecutiveApproval(e.target.checked)}
+                />
+                Chỉ đơn cần BGĐ duyệt
+              </label>
+            )}
             <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer px-2">
               <input
                 type="checkbox"
@@ -305,13 +328,15 @@ export const LeavesPage: React.FC = () => {
               />
               Tất cả kỳ
             </label>
-            <button
-              type="button"
-              onClick={() => setCreateOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-brand-blue text-white text-xs font-semibold hover:bg-blue-700"
-            >
-              <Plus className="w-4 h-4" /> Tạo đơn nghỉ phép
-            </button>
+            {canCreateLeave && (
+              <button
+                type="button"
+                onClick={() => setCreateOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-brand-blue text-white text-xs font-semibold hover:bg-blue-700"
+              >
+                <Plus className="w-4 h-4" /> Tạo đơn nghỉ phép
+              </button>
+            )}
           </div>
         }
       />

@@ -4,15 +4,16 @@ import datetime
 import json
 import sqlite3
 import uuid
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import bcrypt
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.config import settings
-from app.db.connection import get_connection
+from app.core.permissions import get_default_permissions_for_role
+from app.db.connection import get_connection, is_postgres_connection
 from app.schemas.common import RoleEnum
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -38,7 +39,14 @@ class AuthenticatedUser(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     must_change_password: bool = False
+    permissions: List[str] = Field(default_factory=list)
     token_jti: Optional[str] = None
+
+    def has_permission(self, permission_code: str) -> bool:
+        return permission_code in self.permissions
+
+    def has_any_permission(self, *permission_codes: str) -> bool:
+        return any(code in self.permissions for code in permission_codes)
 
 
 def hash_password(plain_password: str) -> str:
@@ -55,7 +63,7 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
 
 
 def create_access_token(user_id: str, employee_id: str) -> Tuple[str, str, int]:
-    """Create a signed JWT containing only identity claims (role & scope are always loaded fresh from DB)."""
+    """Create a signed JWT containing only identity claims (role, permissions & scope are always loaded fresh from DB)."""
     jti = str(uuid.uuid4())
     now = datetime.datetime.now(datetime.timezone.utc)
     expires_delta = datetime.timedelta(minutes=settings.jwt_expire_minutes)
@@ -76,7 +84,7 @@ def revoke_token(jti: Optional[str]) -> None:
 
 
 def get_db_dependency():
-    """FastAPI dependency yielding a writable SQLite connection; overrideable in pytest."""
+    """FastAPI dependency yielding a writable DB connection; overrideable in pytest."""
     conn = get_connection(readonly=False)
     try:
         yield conn
@@ -84,7 +92,68 @@ def get_db_dependency():
         conn.close()
 
 
-def load_authenticated_user(conn: sqlite3.Connection, user_id: str, token_jti: Optional[str] = None) -> Optional[AuthenticatedUser]:
+def load_user_permissions(conn: sqlite3.Connection, user_id: str, role_code: str) -> List[str]:
+    """Load effective permission codes from RBAC tables (live dynamic updates) with safe fallback to canonical defaults."""
+    try:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT p.permission_code
+            FROM roles r
+            JOIN role_permissions rp ON rp.role_id = r.role_id
+            JOIN permissions p ON p.permission_id = rp.permission_id
+            WHERE r.role_code = ?
+               OR r.role_id IN (SELECT ur.role_id FROM user_roles ur WHERE ur.user_id = ?)
+            ORDER BY p.permission_code
+            """,
+            (role_code, user_id),
+        ).fetchall()
+        perms = [str(r["permission_code"]) for r in rows]
+        if perms:
+            return perms
+    except Exception:
+        pass
+    return sorted(get_default_permissions_for_role(role_code))
+
+
+def sync_user_role_mapping(
+    conn: sqlite3.Connection,
+    user_id: str,
+    role_code: str,
+    assigned_by_user_id: Optional[str] = None,
+) -> None:
+    """Keep user_roles synchronized whenever an employee/account role is changed."""
+    try:
+        role_row = conn.execute("SELECT role_id FROM roles WHERE role_code = ?", (role_code,)).fetchone()
+        if not role_row:
+            return
+        role_id = role_row["role_id"]
+        conn.execute("DELETE FROM user_roles WHERE user_id = ?", (user_id,))
+        if is_postgres_connection(conn):
+            conn.execute(
+                """
+                INSERT INTO public.user_roles (user_id, role_id, assigned_by_user_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT (user_id, role_id) DO NOTHING
+                """,
+                (user_id, role_id, assigned_by_user_id),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO user_roles (user_id, role_id, assigned_by_user_id)
+                VALUES (?, ?, ?)
+                """,
+                (user_id, role_id, assigned_by_user_id),
+            )
+    except Exception:
+        pass
+
+
+def load_authenticated_user(
+    conn: sqlite3.Connection,
+    user_id: str,
+    token_jti: Optional[str] = None,
+) -> Optional[AuthenticatedUser]:
     row = conn.execute(
         """
         SELECT
@@ -119,12 +188,15 @@ def load_authenticated_user(conn: sqlite3.Connection, user_id: str, token_jti: O
     if row["is_active"] != 1 or row["employment_status"] != "active":
         return None
 
+    role_enum = RoleEnum(row["role"])
+    perms = load_user_permissions(conn, row["user_id"], role_enum.value)
+
     return AuthenticatedUser(
         user_id=row["user_id"],
         username=row["username"],
         employee_id=row["employee_id"],
         full_name=row["full_name"],
-        role=RoleEnum(row["role"]),
+        role=role_enum,
         department_id=row["department_id"],
         department_name=row["department_name"],
         position=row["position"],
@@ -136,6 +208,7 @@ def load_authenticated_user(conn: sqlite3.Connection, user_id: str, token_jti: O
         email=row["email"],
         phone=row["phone"],
         must_change_password=bool(row["must_change_password"]),
+        permissions=perms,
         token_jti=token_jti,
     )
 
@@ -186,7 +259,7 @@ def get_current_user(
             detail="Thông tin xác thực không hợp lệ.",
         )
 
-    # Always reload role, employee_id, department_id from DB so role/lock changes apply immediately
+    # Always reload role, permissions, employee_id, department_id from DB so changes apply immediately
     user = load_authenticated_user(conn, user_id=user_id, token_jti=jti)
     if user is None:
         raise HTTPException(
@@ -210,24 +283,66 @@ def require_roles(*allowed_roles: RoleEnum) -> Callable[[AuthenticatedUser], Aut
     return _checker
 
 
+def require_permissions(
+    *required_permissions: str,
+    require_all: bool = False,
+) -> Callable[[AuthenticatedUser], AuthenticatedUser]:
+    """Permission-based FastAPI authorization dependency.
+
+    When require_all=False (default), grants access if user holds ANY of the listed permissions.
+    When require_all=True, requires ALL listed permissions.
+    """
+    req_list = list(required_permissions)
+
+    def _checker(current_user: AuthenticatedUser = Depends(get_current_user)) -> AuthenticatedUser:
+        user_perms = set(current_user.permissions)
+        allowed = all(p in user_perms for p in req_list) if require_all else any(p in user_perms for p in req_list)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Tài khoản của bạn không được cấp quyền (permission) cho chức năng này.",
+            )
+        return current_user
+
+    return _checker
+
+
 def build_scope_filter(
     user: AuthenticatedUser,
     employee_col: str = "employee_id",
     department_col: str = "department_id",
 ) -> Tuple[str, List[Any]]:
-    """Unified server-side RBAC SQL WHERE filter helper."""
-    if user.role == RoleEnum.hr:
+    """Unified server-side 5-role RBAC SQL WHERE filter helper.
+
+    - employee  -> own employee_id
+    - manager   -> own department_id
+    - hr        -> company-wide HR business scope
+    - executive -> company-wide read/oversight scope (writes blocked by permission guards)
+    - admin     -> system technical scope ONLY; NEVER automatically granted HR business data scope!
+    """
+    if user.role in (RoleEnum.hr, RoleEnum.executive):
         return "1 = 1", []
     if user.role == RoleEnum.manager:
         return f"{department_col} = ?", [user.department_id]
-    return f"{employee_col} = ?", [user.employee_id]
+    if user.role == RoleEnum.employee:
+        return f"{employee_col} = ?", [user.employee_id]
+    # Admin: Technical Administration ONLY — must explicitly be blocked from HR business data queries
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Vai trò Quản trị hệ thống (Admin) không mặc định có quyền truy cập dữ liệu nghiệp vụ nhân sự.",
+    )
 
 
 def assert_department_access(user: AuthenticatedUser, requested_department_id: Optional[str]) -> Optional[str]:
-    """Ensure requested department_id never widens user scope."""
+    """Ensure requested department_id never widens user scope across all 5 roles."""
+    if user.role == RoleEnum.admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Quản trị hệ thống (Admin) không mặc định truy cập dữ liệu nghiệp vụ theo phòng ban.",
+        )
     if not requested_department_id:
         return user.department_id if user.role == RoleEnum.manager else None
-    if user.role == RoleEnum.hr:
+    if user.role in (RoleEnum.hr, RoleEnum.executive):
         return requested_department_id
     if user.role == RoleEnum.manager:
         if requested_department_id != user.department_id:
@@ -253,11 +368,14 @@ def assert_employee_access(
     ).fetchone()
     if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy nhân viên.")
-    if user.role == RoleEnum.hr:
+    if user.role in (RoleEnum.hr, RoleEnum.executive):
         return target
     if user.role == RoleEnum.manager and target["department_id"] == user.department_id:
         return target
     if user.role == RoleEnum.employee and target["employee_id"] == user.employee_id:
+        return target
+    # Admin only sees own self-profile via /api/profile, NOT other employees' HR business records
+    if user.role == RoleEnum.admin and target["employee_id"] == user.employee_id:
         return target
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,

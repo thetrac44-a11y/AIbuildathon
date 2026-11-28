@@ -13,17 +13,23 @@ def test_health_endpoint():
     assert data["version"] == "1.0.0"
 
 
-def test_sitemap_has_10_screens_and_3_roles():
+def test_sitemap_has_5_roles_and_permission_based_screens():
     response = client.get("/api/meta/sitemap")
     assert response.status_code == 200
     data = response.json()
-    assert data["total_screens"] == 10
-    assert data["roles"] == ["employee", "manager", "hr"]
+    assert data["total_screens"] == 16
+    assert data["roles"] == ["employee", "manager", "hr", "executive", "admin"]
 
     screens_by_id = {s["id"]: s for s in data["screens"]}
     assert "employee" not in screens_by_id["reports"]["allowed_roles"]
+    assert "executive" in screens_by_id["reports"]["allowed_roles"]
+    assert "admin" not in screens_by_id["reports"]["allowed_roles"]
     assert screens_by_id["import"]["allowed_roles"] == ["hr"]
-    assert screens_by_id["accounts"]["allowed_roles"] == ["hr"]
+    assert screens_by_id["system_dashboard"]["allowed_roles"] == ["admin"]
+    assert screens_by_id["rbac"]["allowed_roles"] == ["admin"]
+    assert screens_by_id["system_config"]["allowed_roles"] == ["admin"]
+    assert screens_by_id["kiosk"]["allowed_roles"] == ["admin"]
+    assert set(screens_by_id["accounts"]["allowed_roles"]) == {"admin", "hr"}
 
 
 def test_business_constants_from_spec():

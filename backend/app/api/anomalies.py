@@ -10,9 +10,8 @@ from pydantic import BaseModel, Field
 from app.core.security import (
     AuthenticatedUser,
     assert_department_access,
-    get_current_user,
     get_db_dependency,
-    require_roles,
+    require_permissions,
     write_activity_log,
 )
 from app.schemas.common import RoleEnum
@@ -27,12 +26,17 @@ class AnomalyReviewRequest(BaseModel):
 
 
 def _anomaly_scope_where(user: AuthenticatedUser) -> tuple[str, List[Any]]:
-    if user.role == RoleEnum.hr:
+    if user.role in (RoleEnum.hr, RoleEnum.executive):
         return "1 = 1", []
     if user.role == RoleEnum.manager:
         return "department_id = ?", [user.department_id]
-    # Employee only sees their own personal anomalies (never exposes colleagues inside department R5!)
-    return "scope_type = 'employee' AND employee_id = ?", [user.employee_id]
+    if user.role == RoleEnum.employee:
+        # Employee only sees their own personal anomalies (never exposes colleagues inside department R5!)
+        return "scope_type = 'employee' AND employee_id = ?", [user.employee_id]
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Quản trị hệ thống (Admin) không mặc định truy cập dữ liệu cảnh báo nghiệp vụ R1-R8.",
+    )
 
 
 def _serialize_anomaly(row: sqlite3.Row, user: AuthenticatedUser) -> Dict[str, Any]:
@@ -47,14 +51,14 @@ def _serialize_anomaly(row: sqlite3.Row, user: AuthenticatedUser) -> Dict[str, A
             d["evidence_data"] = {}
     except Exception:
         d["evidence_data"] = {}
-    d["can_review"] = user.role in (RoleEnum.manager, RoleEnum.hr)
+    d["can_review"] = user.has_permission("anomaly.review")
     return d
 
 
 @router.post("/scan")
 def trigger_anomaly_scan(
     period: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
-    current_user: AuthenticatedUser = Depends(require_roles(RoleEnum.manager, RoleEnum.hr)),
+    current_user: AuthenticatedUser = Depends(require_permissions("anomaly.review")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ) -> Dict[str, Any]:
     scope_dept = current_user.department_id if current_user.role == RoleEnum.manager else None
@@ -79,7 +83,9 @@ def list_anomalies(
     review_status: Optional[str] = Query(default="all"),
     department_id: Optional[str] = Query(default=None),
     search: Optional[str] = Query(default=None),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(
+        require_permissions("anomaly.read.self", "anomaly.read.department", "anomaly.read.all")
+    ),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ) -> Dict[str, Any]:
     effective_dept = assert_department_access(current_user, department_id)
@@ -87,7 +93,7 @@ def list_anomalies(
 
     base_clauses = [scope_sql]
     base_params: List[Any] = [*scope_params]
-    if effective_dept and current_user.role == RoleEnum.hr:
+    if effective_dept and current_user.role in (RoleEnum.hr, RoleEnum.executive):
         base_clauses.append("department_id = ?")
         base_params.append(effective_dept)
     if period:
@@ -95,7 +101,6 @@ def list_anomalies(
         base_params.append(period)
     base_where = " AND ".join(base_clauses)
 
-    # KPI summary in scope
     summary_row = conn.execute(
         f"""
         SELECT
@@ -144,6 +149,7 @@ def list_anomalies(
 
     return {
         "total": len(rows),
+        "can_review": current_user.has_permission("anomaly.review"),
         "summary": {
             "total": int(summary_row["total"] or 0),
             "open": int(summary_row["open_count"] or 0),
@@ -160,7 +166,9 @@ def list_anomalies(
 @router.get("/{anomaly_id}")
 def get_anomaly_detail(
     anomaly_id: int,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(
+        require_permissions("anomaly.read.self", "anomaly.read.department", "anomaly.read.all")
+    ),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ) -> Dict[str, Any]:
     row = conn.execute("SELECT * FROM v_anomalies WHERE anomaly_id = ?", (anomaly_id,)).fetchone()
@@ -181,7 +189,7 @@ def get_anomaly_detail(
 def review_anomaly(
     anomaly_id: int,
     payload: AnomalyReviewRequest,
-    current_user: AuthenticatedUser = Depends(require_roles(RoleEnum.manager, RoleEnum.hr)),
+    current_user: AuthenticatedUser = Depends(require_permissions("anomaly.review")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ) -> Dict[str, Any]:
     row = conn.execute("SELECT * FROM v_anomalies WHERE anomaly_id = ?", (anomaly_id,)).fetchone()
