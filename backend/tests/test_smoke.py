@@ -13,11 +13,11 @@ def test_health_endpoint():
     assert data["version"] == "1.0.0"
 
 
-def test_sitemap_has_10_screens_and_3_roles():
+def test_sitemap_has_11_screens_and_3_roles():
     response = client.get("/api/meta/sitemap")
     assert response.status_code == 200
     data = response.json()
-    assert data["total_screens"] == 10
+    assert data["total_screens"] == 11
     assert data["roles"] == ["employee", "manager", "hr"]
 
     screens_by_id = {s["id"]: s for s in data["screens"]}

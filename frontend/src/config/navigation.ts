@@ -5,6 +5,11 @@ export const ALLOW_MANAGER_EMPLOYEE_READ =
 
 export const SITEMAP_SCREENS: NavItem[] = [
   {
+    id: 'face-attendance', code: '11', title: 'Máy chấm công khuôn mặt',
+    path: '/face-attendance', group: 'Quản trị nhân sự', iconName: 'Clock',
+    allowedRoles: ['hr'], syncPeriodFilter: false,
+  },
+  {
     id: 'dashboard',
     code: '01',
     title: 'Tổng quan',

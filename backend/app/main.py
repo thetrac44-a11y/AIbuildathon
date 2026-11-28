@@ -8,6 +8,7 @@ from app.api.operations import router as operations_router
 from app.api.anomalies import router as anomalies_router
 from app.api.assistant import router as assistant_router
 from app.api.reports import router as reports_router
+from app.api.faces import router as faces_router
 
 
 def create_app() -> FastAPI:
@@ -44,6 +45,7 @@ def create_app() -> FastAPI:
     application.include_router(anomalies_router)
     application.include_router(assistant_router)
     application.include_router(reports_router)
+    application.include_router(faces_router)
     return application
 
 

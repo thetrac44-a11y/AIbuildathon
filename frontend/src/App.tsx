@@ -15,6 +15,7 @@ import { ProfilePage } from './pages/ProfilePage';
 import { ImportPage } from './pages/ImportPage';
 import { EmployeesPage } from './pages/EmployeesPage';
 import { AccountsPage } from './pages/AccountsPage';
+import { FaceAttendancePage } from './pages/FaceAttendancePage';
 
 export const AppRoutes: React.FC = () => {
   const { user, isLoadingAuth } = useAuth();
@@ -36,6 +37,7 @@ export const AppRoutes: React.FC = () => {
   return (
     <AppShell>
       <Routes>
+        <Route path="/face-attendance" element={<RouteGuard screenId="face-attendance"><FaceAttendancePage /></RouteGuard>} />
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route
           path="/dashboard"

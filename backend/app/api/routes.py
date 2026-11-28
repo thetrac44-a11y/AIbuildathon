@@ -9,6 +9,8 @@ router = APIRouter(prefix="/api")
 def build_screens(allow_manager_employee_read: bool = True) -> List[NavigationScreen]:
     employee_mgmt_roles = [RoleEnum.hr, RoleEnum.manager] if allow_manager_employee_read else [RoleEnum.hr]
     return [
+        NavigationScreen(id="face-attendance", code="11", title="Máy chấm công khuôn mặt",
+                         path="/face-attendance", group="Quản trị nhân sự", allowed_roles=[RoleEnum.hr]),
         NavigationScreen(
             id="dashboard",
             code="01",

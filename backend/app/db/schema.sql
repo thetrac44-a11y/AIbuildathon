@@ -1,5 +1,26 @@
 PRAGMA foreign_keys = ON;
 
+-- Face templates only: camera images are never persisted.
+CREATE TABLE IF NOT EXISTS face_profiles (
+    employee_id TEXT PRIMARY KEY REFERENCES employees(employee_id),
+    encrypted_embeddings TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    sample_count INTEGER NOT NULL,
+    consent_text TEXT NOT NULL,
+    consent_at TEXT NOT NULL,
+    registered_by TEXT NOT NULL REFERENCES users(user_id)
+);
+CREATE TABLE IF NOT EXISTS face_scan_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    employee_id TEXT REFERENCES employees(employee_id),
+    actor_user_id TEXT NOT NULL REFERENCES users(user_id),
+    mode TEXT NOT NULL CHECK (mode IN ('check_in', 'check_out')),
+    result TEXT NOT NULL,
+    score REAL,
+    scanned_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_face_scan_employee_time ON face_scan_logs(employee_id, scanned_at);
+
 -- =============================================================================
 -- 1. CORE TABLES (THEO PDF GOC)
 -- =============================================================================

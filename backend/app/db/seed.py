@@ -83,6 +83,8 @@ def seed_database(db_path: Optional[Path | str] = None, reset: bool = False) -> 
         if reset and existing_emp > 0:
             conn.execute("PRAGMA foreign_keys = OFF;")
             for table in [
+                "face_scan_logs",
+                "face_profiles",
                 "leave_approval_logs",
                 "activity_logs",
                 "import_logs",
