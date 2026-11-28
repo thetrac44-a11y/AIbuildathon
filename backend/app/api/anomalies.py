@@ -38,7 +38,13 @@ def _anomaly_scope_where(user: AuthenticatedUser) -> tuple[str, List[Any]]:
 def _serialize_anomaly(row: sqlite3.Row, user: AuthenticatedUser) -> Dict[str, Any]:
     d = dict(row)
     try:
-        d["evidence_data"] = json.loads(d["evidence"])
+        raw_ev = d.get("evidence")
+        if isinstance(raw_ev, dict):
+            d["evidence_data"] = raw_ev
+        elif isinstance(raw_ev, str):
+            d["evidence_data"] = json.loads(raw_ev)
+        else:
+            d["evidence_data"] = {}
     except Exception:
         d["evidence_data"] = {}
     d["can_review"] = user.role in (RoleEnum.manager, RoleEnum.hr)

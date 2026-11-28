@@ -5,7 +5,10 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.db.connection import is_postgres_connection
+
 SQL_DIR = Path(__file__).resolve().parents[2] / "sql"
+SQL_PG_DIR = Path(__file__).resolve().parents[2] / "sql_postgres"
 
 RULE_SQL_FILES: List[tuple[str, str, str]] = [
     ("R1", "late_repeated", "r1_late_repeated.sql"),
@@ -270,8 +273,9 @@ def run_anomaly_scan(
     updated = 0
     by_rule: Dict[str, int] = {code: 0 for code, _, _ in RULE_SQL_FILES}
 
+    sql_root = SQL_PG_DIR if is_postgres_connection(conn) else SQL_DIR
     for rule_code, anomaly_type, filename in RULE_SQL_FILES:
-        sql_path = SQL_DIR / filename
+        sql_path = sql_root / filename
         sql_text = sql_path.read_text(encoding="utf-8")
         rows = conn.execute(sql_text, {"period": period}).fetchall()
         if department_id is not None:

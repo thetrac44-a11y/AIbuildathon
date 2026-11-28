@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Dict, Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -16,3 +16,5 @@ class LeaveReviewRequest(BaseModel):
 
 class ImportConfirmRequest(BaseModel):
     duplicate_policy: str = Field(default="skip", pattern="^(skip|update)$")
+    duplicate_decisions: Optional[Dict[str, Literal["keep_existing", "update_from_excel"]]] = None
+    allow_future_dates: bool = False

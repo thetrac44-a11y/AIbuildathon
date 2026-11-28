@@ -307,4 +307,247 @@ describe('BUG-01 to BUG-10 Frontend Regression Suite', () => {
     expect(avatar.className).toContain('h-14');
     expect(avatar.className).toContain('shrink-0');
   });
+
+  it('Import P1+P2: renders 5 KPI cards, inline business warnings, future-date guard, duplicate diff & structured error columns', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
+      if (String(url).includes('/imports/preview') && opts?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            batch_id: 'IMP-TEST1234',
+            file_name: 'Demo_Import_Cham_Cong_BGK.xlsx',
+            data_type: 'attendance',
+            reference_today: '2026-11-23',
+            summary: {
+              rows_total: 8,
+              rows_valid: 4,
+              rows_warning: 4,
+              rows_future: 1,
+              rows_duplicate: 1,
+              rows_error: 3,
+            },
+            preview_rows: [
+              {
+                row_number: 2,
+                employee_id: 'NV010',
+                work_date: '2026-11-07',
+                check_in: '2026-11-07 08:25:00',
+                check_out: null,
+                status: 'present',
+                is_future_date: false,
+                warnings: [
+                  { code: 'missing_punch', level: 'warning', label: 'Thiếu giờ ra', detail: 'Không tính giờ công hoàn chỉnh' },
+                  { code: 'weekend_or_holiday', level: 'warning', label: 'Chấm công thứ Bảy (chưa có đơn OT)', detail: 'Đối chiếu lịch làm' },
+                ],
+              },
+              {
+                row_number: 5,
+                employee_id: 'NV010',
+                work_date: '2026-11-28',
+                check_in: '2026-11-28 08:22:00',
+                check_out: '2026-11-28 17:10:00',
+                status: 'present',
+                is_future_date: true,
+                warnings: [
+                  { code: 'future_date', level: 'high', label: 'Ngày trong tương lai', detail: 'Lớn hơn ngày hiện tại' },
+                ],
+              },
+            ],
+            duplicate_rows: [
+              {
+                row_number: 6,
+                reason: 'Trùng bản ghi chấm công (NV007, 2026-10-02)',
+                data: { employee_id: 'NV007', work_date: '2026-10-02', check_in: '2026-10-02 08:20:00', check_out: '2026-10-02 17:30:00', status: 'present' },
+                existing: { employee_id: 'NV007', work_date: '2026-10-02', check_in: '2026-10-02 08:55:00', check_out: '2026-10-02 17:32:00', status: 'present' },
+                duplicate_source: 'database',
+                is_identical: false,
+                match_type: 'key_conflict',
+                changed_fields: ['check_in', 'check_out'],
+                comparison_label: 'Trùng khóa, khác dữ liệu',
+                can_update: true,
+                default_action: 'keep_existing',
+              },
+              {
+                row_number: 10,
+                reason: 'Trùng bản ghi chấm công (NV007, 2026-10-05)',
+                data: { employee_id: 'NV007', work_date: '2026-10-05', check_in: '2026-10-05 08:25:00', check_out: '2026-10-05 17:30:00', status: 'present' },
+                existing: { employee_id: 'NV007', work_date: '2026-10-05', check_in: '2026-10-05 08:25:00', check_out: '2026-10-05 17:30:00', status: 'present' },
+                duplicate_source: 'database',
+                is_identical: true,
+                match_type: 'exact_match',
+                changed_fields: [],
+                comparison_label: 'Trùng hoàn toàn',
+                can_update: true,
+                default_action: 'keep_existing',
+              },
+            ],
+            error_rows: [
+              {
+                row_number: 7,
+                error: 'Mã nhân viên không tồn tại: NV999',
+                fields: { employee_id: 'NV999', work_date: '2026-11-07', check_in: '08:25', check_out: '17:30', status: 'present' },
+                raw: { employee_id: 'NV999', work_date: '2026-11-07' },
+              },
+            ],
+          }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ items: [] }),
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { container } = render(
+      <AuthProvider initialTestUser={makeUser('hr')}>
+        <MemoryRouter initialEntries={['/admin/import']}>
+          <AppRoutes />
+        </MemoryRouter>
+      </AuthProvider>
+    );
+
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const dummyFile = new File(['dummy'], 'Demo_Import_Cham_Cong_BGK.xlsx', {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    fireEvent.change(fileInput, { target: { files: [dummyFile] } });
+    fireEvent.click(screen.getByRole('button', { name: /Kiểm tra & Xem trước/i }));
+
+    // Verify 5 KPI cards & inline business warnings + future-date guard
+    expect(await screen.findByText('Dòng đủ điều kiện nhập')).toBeInTheDocument();
+    expect(screen.getByText('Dòng có cảnh báo nghiệp vụ')).toBeInTheDocument();
+    expect(screen.getByText('Thiếu giờ ra')).toBeInTheDocument();
+    expect(screen.getByText('Chấm công thứ Bảy (chưa có đơn OT)')).toBeInTheDocument();
+    expect(screen.getByText('Ngày trong tương lai')).toBeInTheDocument();
+    expect(screen.getByText(/Cho phép nhập ngày tương lai/i)).toBeInTheDocument();
+
+    // Default confirm button reflects 3 valid inserts (1 future blocked) and 0 duplicate updates (safe keep_existing default)
+    expect(screen.getByRole('button', { name: /Xác nhận nhập \(3 thêm mới\)/i })).toBeInTheDocument();
+
+    // Switch to Duplicate tab -> verify 9 columns, exact_match vs key_conflict badges, and per-row decision updates button dynamically
+    fireEvent.click(screen.getByRole('button', { name: /Trùng lặp \(1\)/i }));
+    expect(await screen.findByText('Trùng khóa, khác dữ liệu')).toBeInTheDocument();
+    expect(screen.getByText('Trùng hoàn toàn')).toBeInTheDocument();
+    expect(screen.getByText('Giờ vào (Excel)')).toBeInTheDocument();
+    expect(screen.getByText('Giờ vào (Database)')).toBeInTheDocument();
+    expect(screen.getByText('Hành động xử lý')).toBeInTheDocument();
+
+    // Pick "Cập nhật bằng Excel" ONLY on row 6 (leaving row 10 as "Giữ dữ liệu hiện tại")
+    const updateRadios = screen.getAllByRole('radio', { name: /Cập nhật bằng Excel/i });
+    fireEvent.click(updateRadios[0]);
+    expect(screen.getByRole('button', { name: /Xác nhận nhập \(3 thêm mới, 1 cập nhật\)/i })).toBeInTheDocument();
+
+    // Switch to Error tab -> structured columns + collapsible JSON toggle
+    fireEvent.click(screen.getByRole('button', { name: /Lỗi cần sửa \(3\)/i }));
+    expect(await screen.findByText('NV999')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Xem JSON/i }));
+    expect(await screen.findByText(/"employee_id": "NV999"/i)).toBeInTheDocument();
+  });
+
+  it('Import History: opens saved detail modal via Xem lai and restores staged batch for confirmation', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('/imports/logs/42')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            log: {
+              id: 42,
+              batch_id: 'IMP-REPLAY42',
+              file_name: 'Demo_Import_Cham_Cong_BGK.xlsx',
+              data_type: 'attendance',
+              uploaded_by: 'USR002',
+              uploaded_by_username: 'hr@company.vn',
+              rows_total: 8,
+              rows_valid: 4,
+              rows_error: 3,
+              rows_duplicate: 1,
+              status: 'preview',
+              has_snapshot: true,
+              created_at: '2026-11-23 21:20:00',
+            },
+            has_snapshot: true,
+            can_resume_confirm: true,
+            can_download_errors: true,
+            preview: {
+              batch_id: 'IMP-REPLAY42',
+              file_name: 'Demo_Import_Cham_Cong_BGK.xlsx',
+              data_type: 'attendance',
+              reference_today: '2026-11-23',
+              summary: {
+                rows_total: 8,
+                rows_valid: 4,
+                rows_warning: 4,
+                rows_future: 1,
+                rows_error: 3,
+                rows_duplicate: 1,
+              },
+              preview_rows: [
+                {
+                  row_number: 2,
+                  employee_id: 'NV010',
+                  work_date: '2026-11-07',
+                  check_in: '2026-11-07 08:25:00',
+                  check_out: null,
+                  status: 'present',
+                  is_future_date: false,
+                  warnings: [
+                    { code: 'missing_punch', level: 'warning', label: 'Thiếu giờ ra', detail: 'Không tính đủ công' },
+                  ],
+                },
+              ],
+              duplicate_rows: [],
+              error_rows: [],
+            },
+            result: null,
+          }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          total: 1,
+          items: [
+            {
+              id: 42,
+              batch_id: 'IMP-REPLAY42',
+              file_name: 'Demo_Import_Cham_Cong_BGK.xlsx',
+              data_type: 'attendance',
+              uploaded_by: 'USR002',
+              uploaded_by_username: 'hr@company.vn',
+              rows_total: 8,
+              rows_valid: 4,
+              rows_error: 3,
+              rows_duplicate: 1,
+              status: 'preview',
+              has_snapshot: true,
+              created_at: '2026-11-23 21:20:00',
+            },
+          ],
+        }),
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <AuthProvider initialTestUser={makeUser('hr')}>
+        <MemoryRouter initialEntries={['/admin/import']}>
+          <AppRoutes />
+        </MemoryRouter>
+      </AuthProvider>
+    );
+
+    const viewBtn = await screen.findByRole('button', { name: /Xem lại/i });
+    fireEvent.click(viewBtn);
+
+    expect(await screen.findByText(/Chi tiết phiên nhập: Demo_Import_Cham_Cong_BGK\.xlsx/i)).toBeInTheDocument();
+    expect(screen.getByText('Thiếu giờ ra')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Mở lại để xác nhận nhập/i }));
+    expect(await screen.findByRole('button', { name: /Xác nhận nhập \(3 thêm mới\)/i })).toBeInTheDocument();
+  });
 });

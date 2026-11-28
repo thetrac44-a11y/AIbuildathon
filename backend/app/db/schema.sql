@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS leave_approval_logs (
 
 CREATE TABLE IF NOT EXISTS import_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id TEXT NULL,
     file_name TEXT NOT NULL,
     data_type TEXT NOT NULL CHECK (data_type IN ('employees', 'attendance', 'leave_requests')),
     uploaded_by TEXT NOT NULL,
@@ -144,6 +145,8 @@ CREATE TABLE IF NOT EXISTS import_logs (
     rows_error INTEGER NOT NULL DEFAULT 0,
     rows_duplicate INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL CHECK (status IN ('preview', 'completed', 'failed')),
+    detail_json TEXT NULL,
+    result_json TEXT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
     FOREIGN KEY (uploaded_by) REFERENCES users(user_id) ON UPDATE CASCADE ON DELETE RESTRICT
 );

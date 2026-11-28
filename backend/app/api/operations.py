@@ -19,9 +19,12 @@ from app.core.security import (
 from app.schemas.common import RoleEnum
 from app.schemas.operations import ImportConfirmRequest, LeaveCreateRequest, LeaveReviewRequest
 from app.services.import_service import (
+    ImportConflictError,
     confirm_staged_import,
+    ensure_import_logs_columns,
     export_batch_errors_csv,
     generate_template_xlsx,
+    get_import_log_detail,
     stage_and_validate_import,
 )
 
@@ -541,9 +544,10 @@ async def preview_import(
 def download_import_errors(
     batch_id: str,
     current_user: AuthenticatedUser = Depends(require_roles(RoleEnum.hr)),
+    conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
     try:
-        csv_text = export_batch_errors_csv(batch_id, actor_user_id=current_user.user_id)
+        csv_text = export_batch_errors_csv(batch_id, actor_user_id=current_user.user_id, conn=conn)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     except PermissionError as exc:
@@ -568,11 +572,15 @@ def confirm_import(
             batch_id=batch_id,
             actor_user_id=current_user.user_id,
             duplicate_policy=payload.duplicate_policy,
+            duplicate_decisions=payload.duplicate_decisions,
+            allow_future_dates=payload.allow_future_dates,
         )
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     except PermissionError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    except ImportConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
@@ -582,13 +590,35 @@ def list_import_logs(
     current_user: AuthenticatedUser = Depends(require_roles(RoleEnum.hr)),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ):
+    ensure_import_logs_columns(conn)
     rows = conn.execute(
         """
-        SELECT il.*, u.username AS uploaded_by_username
+        SELECT il.id, il.batch_id, il.file_name, il.data_type, il.uploaded_by,
+               u.username AS uploaded_by_username,
+               il.rows_total, il.rows_valid, il.rows_error, il.rows_duplicate,
+               il.status, il.created_at,
+               CASE WHEN il.detail_json IS NOT NULL THEN 1 ELSE 0 END AS has_snapshot
         FROM import_logs il
         LEFT JOIN users u ON u.user_id = il.uploaded_by
         ORDER BY il.id DESC
         LIMIT 50
         """
     ).fetchall()
-    return {"total": len(rows), "items": [dict(r) for r in rows]}
+    items = []
+    for r in rows:
+        item = dict(r)
+        item["has_snapshot"] = bool(item.get("has_snapshot"))
+        items.append(item)
+    return {"total": len(items), "items": items}
+
+
+@router.get("/imports/logs/{log_id}")
+def get_import_log_detail_endpoint(
+    log_id: int,
+    current_user: AuthenticatedUser = Depends(require_roles(RoleEnum.hr)),
+    conn: sqlite3.Connection = Depends(get_db_dependency),
+):
+    try:
+        return get_import_log_detail(conn=conn, log_id=log_id, actor_user_id=current_user.user_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))

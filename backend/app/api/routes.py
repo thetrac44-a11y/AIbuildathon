@@ -1,6 +1,7 @@
 from typing import List
 from fastapi import APIRouter
 from app.core.config import settings
+from app.db.connection import is_postgres_url
 from app.schemas.common import HealthResponse, NavigationScreen, RoleEnum, SitemapResponse
 
 router = APIRouter(prefix="/api")
@@ -99,6 +100,7 @@ def get_health() -> HealthResponse:
         service=settings.app_name,
         version=settings.version,
         environment=settings.app_env,
+        database="postgresql (supabase)" if is_postgres_url() else "sqlite",
     )
 
 

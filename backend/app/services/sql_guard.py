@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import settings
 from app.core.security import AuthenticatedUser
-from app.db.connection import get_connection
+from app.db.connection import get_connection, is_postgres_connection
 from app.schemas.common import RoleEnum
 
 ALLOWED_VIEWS = {
@@ -48,15 +48,21 @@ FORBIDDEN_KEYWORDS = {
 }
 
 FORBIDDEN_IDENTIFIERS = {
-    # Sensitive / system / audit tables
+    # Sensitive / system / audit tables (SQLite + PostgreSQL)
     "users", "password_hash", "sqlite_master", "sqlite_schema", "sqlite_temp_master",
     "sqlite_sequence", "activity_logs", "query_audit_log", "import_logs",
-    "leave_approval_logs", "main", "temp",
+    "leave_approval_logs", "main", "temp", "public",
+    "pg_catalog", "pg_tables", "pg_class", "pg_roles", "pg_user", "pg_shadow",
+    "pg_authid", "information_schema",
     # Raw base tables (must NEVER be queried directly; only the 4 RBAC-scoped v_* TEMP views are allowed)
     "employees", "attendance", "leave_requests", "anomalies",
-    "departments", "holidays", "overtime_requests",
+    "departments", "holidays", "overtime_requests", "positions",
+    "roles", "permissions", "user_roles", "role_permissions",
+    "attendance_policies", "notifications", "kiosk_devices",
+    "face_profiles", "face_consent_records", "face_scan_logs",
+    "company_documents", "document_chunks",
     # Sensitive employee PII excluded from v_employees
-    "email", "phone",
+    "email", "phone", "embedding_ciphertext", "device_secret_hash",
 }
 
 
@@ -144,7 +150,7 @@ def validate_readonly_sql(sql: str, max_rows: int = 200) -> str:
     return cleaned
 
 
-def _create_scoped_temp_views(conn: sqlite3.Connection, user: AuthenticatedUser) -> None:
+def _create_scoped_temp_views(conn: Any, user: AuthenticatedUser) -> None:
     """Create TEMP views shadowing the 4 allowlisted views with hard-coded RBAC scope for the authenticated user."""
     if user.role == RoleEnum.hr:
         emp_cond = "1 = 1"
@@ -164,10 +170,11 @@ def _create_scoped_temp_views(conn: sqlite3.Connection, user: AuthenticatedUser)
         leave_cond = f"employee_id = '{emp}'"
         anom_cond = f"scope_type = 'employee' AND employee_id = '{emp}'"
 
-    conn.execute(f"CREATE TEMP VIEW v_employees AS SELECT * FROM main.v_employees WHERE {emp_cond}")
-    conn.execute(f"CREATE TEMP VIEW v_attendance_daily AS SELECT * FROM main.v_attendance_daily WHERE {att_cond}")
-    conn.execute(f"CREATE TEMP VIEW v_leave_requests AS SELECT * FROM main.v_leave_requests WHERE {leave_cond}")
-    conn.execute(f"CREATE TEMP VIEW v_anomalies AS SELECT * FROM main.v_anomalies WHERE {anom_cond}")
+    source_schema = "public" if is_postgres_connection(conn) else "main"
+    conn.execute(f"CREATE TEMP VIEW v_employees AS SELECT * FROM {source_schema}.v_employees WHERE {emp_cond}")
+    conn.execute(f"CREATE TEMP VIEW v_attendance_daily AS SELECT * FROM {source_schema}.v_attendance_daily WHERE {att_cond}")
+    conn.execute(f"CREATE TEMP VIEW v_leave_requests AS SELECT * FROM {source_schema}.v_leave_requests WHERE {leave_cond}")
+    conn.execute(f"CREATE TEMP VIEW v_anomalies AS SELECT * FROM {source_schema}.v_anomalies WHERE {anom_cond}")
 
 
 def execute_guarded_sql(
@@ -178,14 +185,43 @@ def execute_guarded_sql(
     max_rows: Optional[int] = None,
     timeout_seconds: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], str, float]:
-    """Validate and execute read-only SQL on RBAC-scoped TEMP views with SQLite authorizer & timeout guard."""
+    """Validate and execute read-only SQL on RBAC-scoped TEMP views (supports both SQLite & Supabase PostgreSQL)."""
     limit = max_rows or settings.ai_query_max_rows
     timeout = timeout_seconds or float(settings.ai_query_timeout_seconds)
     validated_sql = validate_readonly_sql(sql, max_rows=limit)
 
-    conn = get_connection(db_path=db_path, readonly=True)
+    # For PostgreSQL we first create session TEMP VIEWs, then lock into a READ ONLY transaction with statement_timeout
+    conn = get_connection(db_path=db_path, readonly=False if db_path is None else True)
     start_ts = time.monotonic()
     try:
+        if is_postgres_connection(conn):
+            _create_scoped_temp_views(conn, user)
+            conn.commit()
+            try:
+                conn.execute("BEGIN TRANSACTION READ ONLY")
+                conn.execute(f"SET LOCAL statement_timeout = {max(500, int(timeout * 1000))}")
+                cursor = conn.execute(validated_sql, params or [])
+                rows = [dict(r) for r in cursor.fetchmany(limit)]
+                elapsed_ms = round((time.monotonic() - start_ts) * 1000.0, 2)
+                return rows, validated_sql, elapsed_ms
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "statement timeout" in msg or "canceling statement" in msg:
+                    raise SQLGuardError(f"Truy vấn vượt quá giới hạn thời gian ({timeout} giây).")
+                if "read-only transaction" in msg:
+                    raise SQLGuardError("Truy vấn ghi bị chặn bởi giao dịch READ ONLY của PostgreSQL.")
+                raise SQLGuardError(f"Lỗi thực thi truy vấn đọc PostgreSQL: {exc}")
+            finally:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
+        # SQLite path: re-open strict mode=ro if opened read-write above
+        if db_path is None:
+            conn.close()
+            conn = get_connection(db_path=None, readonly=True)
+
         _create_scoped_temp_views(conn, user)
 
         # Install SQLite authorizer blocking any write or access to sensitive tables
