@@ -266,7 +266,14 @@ CREATE TABLE IF NOT EXISTS company_documents (
     uploaded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
     processed_at TEXT NULL,
     metadata TEXT NOT NULL DEFAULT '{}',
-    FOREIGN KEY (uploaded_by_user_id) REFERENCES users(user_id) ON UPDATE CASCADE ON DELETE SET NULL
+    source_content TEXT NULL,
+    visibility TEXT NOT NULL DEFAULT 'all' CHECK (visibility IN ('all', 'manager_up', 'hr_exec_only', 'hr_only')),
+    effective_from TEXT NULL,
+    effective_to TEXT NULL,
+    is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0, 1)),
+    supersedes_document_id INTEGER NULL,
+    FOREIGN KEY (uploaded_by_user_id) REFERENCES users(user_id) ON UPDATE CASCADE ON DELETE SET NULL,
+    FOREIGN KEY (supersedes_document_id) REFERENCES company_documents(document_id) ON UPDATE CASCADE ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS document_chunks (
@@ -275,10 +282,39 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
     content TEXT NOT NULL,
     embedding_model TEXT NULL,
+    embedding_json TEXT NULL,
+    embedding_dim INTEGER NULL,
     metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
     UNIQUE (document_id, chunk_index),
     FOREIGN KEY (document_id) REFERENCES company_documents(document_id) ON UPDATE CASCADE ON DELETE CASCADE
+);
+
+-- =============================================================================
+-- 2C. AI CONVERSATION HISTORY TABLES (PHASE 3 — USER-ISOLATED MULTI-TURN CONTEXT)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS ai_conversations (
+    conversation_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    context_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON UPDATE CASCADE ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS ai_messages (
+    message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content TEXT NOT NULL,
+    route_type TEXT NULL,
+    response_json TEXT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+    FOREIGN KEY (conversation_id) REFERENCES ai_conversations(conversation_id) ON UPDATE CASCADE ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON UPDATE CASCADE ON DELETE CASCADE
 );
 
 -- =============================================================================
@@ -299,6 +335,8 @@ CREATE INDEX IF NOT EXISTS idx_users_employee ON users(employee_id);
 CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_query_audit_asked ON query_audit_log(asked_at);
 CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON revoked_tokens(expires_at);
+CREATE INDEX IF NOT EXISTS idx_ai_conversations_user_updated ON ai_conversations(user_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_ai_messages_conv_id ON ai_messages(conversation_id, message_id);
 
 -- =============================================================================
 -- 4. SAFE ALLOWLIST VIEWS FOR AI & REPORTING

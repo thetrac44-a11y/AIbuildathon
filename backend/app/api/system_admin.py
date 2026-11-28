@@ -5,7 +5,7 @@ import json
 import sqlite3
 import uuid
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
 
 from app.core.permissions import ALL_PERMISSION_CODES, PROTECTED_ADMIN_PERMISSIONS
@@ -17,6 +17,15 @@ from app.core.security import (
 )
 from app.db.connection import is_postgres_connection, is_postgres_url
 from app.schemas.common import RoleEnum
+from app.services.ai_rag_service import (
+    archive_rag_document,
+    ingest_rag_document,
+    query_rag_knowledge,
+    reindex_rag_document_real,
+)
+from app.services.rag_document_processor import RagDocumentProcessingError
+from app.services.rag_embeddings import EmbeddingProviderError
+from app.services.rag_retriever import _parse_json_meta
 
 router = APIRouter(prefix="/api", tags=["system-admin-rbac"])
 
@@ -41,7 +50,19 @@ class RagDocumentCreateRequest(BaseModel):
     original_file_name: str = Field(..., min_length=2, max_length=200)
     document_type: str = Field(default="policy", max_length=60)
     version_label: Optional[str] = Field(default="v1.0", max_length=40)
-    content: str = Field(..., min_length=10, max_length=100000)
+    content: str = Field(..., min_length=10, max_length=200000)
+    visibility: str = Field(default="all", max_length=30)
+    effective_from: Optional[str] = Field(default=None, max_length=20)
+    effective_to: Optional[str] = Field(default=None, max_length=20)
+    supersedes_document_id: Optional[int] = Field(default=None)
+
+
+class RagSearchRequest(BaseModel):
+    question: str = Field(..., min_length=2, max_length=1000)
+    mode: str = Field(default="hybrid", pattern="^(bm25|vector|hybrid)$")
+    top_k: int = Field(default=5, ge=1, le=15)
+    as_of_date: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    document_type: Optional[str] = Field(default=None, max_length=60)
 
 
 class KioskDeviceCreateRequest(BaseModel):
@@ -57,24 +78,6 @@ class KioskDeviceUpdateRequest(BaseModel):
     location_name: Optional[str] = Field(default=None, max_length=120)
     branch_name: Optional[str] = Field(default=None, max_length=120)
     is_active: Optional[bool] = None
-
-
-def _chunk_text(content: str, chunk_size: int = 600) -> List[str]:
-    clean = content.strip()
-    if not clean:
-        return []
-    paragraphs = [p.strip() for p in clean.split("\n\n") if p.strip()]
-    chunks: List[str] = []
-    buf = ""
-    for para in paragraphs:
-        if buf and len(buf) + len(para) + 2 > chunk_size:
-            chunks.append(buf)
-            buf = para
-        else:
-            buf = f"{buf}\n\n{para}" if buf else para
-    if buf:
-        chunks.append(buf)
-    return chunks or [clean[:chunk_size]]
 
 
 # =============================================================================
@@ -444,21 +447,42 @@ def update_system_config(
 
 @router.get("/rag/documents")
 def list_rag_documents(
+    status_filter: Optional[str] = Query(default=None, alias="status"),
     current_user: AuthenticatedUser = Depends(require_permissions("rag.manage")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ) -> Dict[str, Any]:
+    where_clause = "WHERE d.status = ?" if (status_filter and status_filter != "all") else ""
+    params: List[Any] = [status_filter] if (status_filter and status_filter != "all") else []
     rows = conn.execute(
-        """
+        f"""
         SELECT d.document_id, d.title, d.original_file_name, d.storage_bucket, d.storage_path,
-               d.document_type, d.version_label, d.status, d.uploaded_by_user_id,
-               u.username AS uploaded_by_username, d.uploaded_at, d.processed_at,
+               d.document_type, d.version_label, d.status, d.checksum_sha256, d.uploaded_by_user_id,
+               u.username AS uploaded_by_username, d.uploaded_at, d.processed_at, d.metadata,
+               COALESCE(d.visibility, 'all') AS visibility,
+               d.effective_from, d.effective_to,
+               COALESCE(d.is_current, 1) AS is_current,
+               d.supersedes_document_id,
                (SELECT COUNT(*) FROM document_chunks c WHERE c.document_id = d.document_id) AS chunk_count
         FROM company_documents d
         LEFT JOIN users u ON u.user_id = d.uploaded_by_user_id
+        {where_clause}
         ORDER BY d.document_id DESC
-        """
+        """,
+        params,
     ).fetchall()
-    return {"total": len(rows), "items": [dict(r) for r in rows]}
+
+    items: List[Dict[str, Any]] = []
+    for r in rows:
+        item = dict(r)
+        meta = _parse_json_meta(item.get("metadata"))
+        item["is_current"] = bool(item.get("is_current", 1))
+        item["embedding_model"] = meta.get("embedding_model")
+        item["embedding_dim"] = meta.get("embedding_dim")
+        item["injection_flagged_chunks"] = int(meta.get("injection_flagged_chunks", 0) or 0)
+        item["quarantined_chunks"] = int(meta.get("quarantined_chunks", 0) or 0)
+        item["metadata"] = meta
+        items.append(item)
+    return {"total": len(items), "items": items}
 
 
 @router.post("/rag/documents", status_code=status.HTTP_201_CREATED)
@@ -467,82 +491,93 @@ def create_rag_document(
     current_user: AuthenticatedUser = Depends(require_permissions("rag.manage")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ) -> Dict[str, Any]:
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    safe_name = payload.original_file_name.strip().replace("/", "_").replace("\\", "_")
-    storage_path = f"policies/{uuid.uuid4().hex[:8]}_{safe_name}"
-    chunks = _chunk_text(payload.content)
-    meta_json = json.dumps({"chunks_indexed": len(chunks), "char_count": len(payload.content)}, ensure_ascii=False)
+    try:
+        return ingest_rag_document(
+            conn=conn,
+            actor_user_id=current_user.user_id,
+            title=payload.title,
+            original_file_name=payload.original_file_name,
+            document_type=payload.document_type,
+            version_label=payload.version_label,
+            content=payload.content,
+            visibility=payload.visibility,
+            effective_from=payload.effective_from,
+            effective_to=payload.effective_to,
+            supersedes_document_id=payload.supersedes_document_id,
+        )
+    except RagDocumentProcessingError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except EmbeddingProviderError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+
+
+@router.post("/rag/documents/upload", status_code=status.HTTP_201_CREATED)
+async def upload_rag_document_file(
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    document_type: str = Form(default="policy"),
+    version_label: str = Form(default="v1.0"),
+    visibility: str = Form(default="all"),
+    effective_from: Optional[str] = Form(default=None),
+    effective_to: Optional[str] = Form(default=None),
+    supersedes_document_id: Optional[int] = Form(default=None),
+    current_user: AuthenticatedUser = Depends(require_permissions("rag.manage")),
+    conn: sqlite3.Connection = Depends(get_db_dependency),
+) -> Dict[str, Any]:
+    """Upload and index a PDF, DOCX, TXT, or MD file into company_documents + document_chunks."""
+    raw_bytes = await file.read()
+    try:
+        return ingest_rag_document(
+            conn=conn,
+            actor_user_id=current_user.user_id,
+            title=title,
+            original_file_name=file.filename or "document.txt",
+            document_type=document_type,
+            version_label=version_label,
+            raw_bytes=raw_bytes,
+            visibility=visibility,
+            effective_from=effective_from,
+            effective_to=effective_to,
+            supersedes_document_id=supersedes_document_id,
+        )
+    except RagDocumentProcessingError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except EmbeddingProviderError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+
+
+@router.get("/rag/documents/{doc_id}/chunks")
+def list_rag_document_chunks(
+    doc_id: int,
+    current_user: AuthenticatedUser = Depends(require_permissions("rag.manage")),
+    conn: sqlite3.Connection = Depends(get_db_dependency),
+) -> Dict[str, Any]:
+    doc = conn.execute(
+        "SELECT document_id, title, version_label, status, visibility FROM company_documents WHERE document_id = ?",
+        (doc_id,),
+    ).fetchone()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy tài liệu RAG.")
 
     pg = is_postgres_connection(conn)
-    if pg:
-        cur = conn.execute(
-            """
-            INSERT INTO public.company_documents (
-                title, original_file_name, storage_bucket, storage_path, document_type,
-                version_label, status, uploaded_by_user_id, processed_at, metadata
-            ) VALUES (?, ?, 'hr-documents', ?, ?, ?, 'active', ?, ?, ?::jsonb)
-            """,
-            (
-                payload.title.strip(),
-                safe_name,
-                storage_path,
-                payload.document_type.strip(),
-                payload.version_label,
-                current_user.user_id,
-                now_str,
-                meta_json,
-            ),
-        )
-    else:
-        cur = conn.execute(
-            """
-            INSERT INTO company_documents (
-                title, original_file_name, storage_bucket, storage_path, document_type,
-                version_label, status, uploaded_by_user_id, processed_at, metadata
-            ) VALUES (?, ?, 'hr-documents', ?, ?, ?, 'active', ?, ?, ?)
-            """,
-            (
-                payload.title.strip(),
-                safe_name,
-                storage_path,
-                payload.document_type.strip(),
-                payload.version_label,
-                current_user.user_id,
-                now_str,
-                meta_json,
-            ),
-        )
-    doc_id = cur.lastrowid
-
-    for idx, chunk in enumerate(chunks):
-        chunk_meta = json.dumps({"chunk_index": idx, "length": len(chunk)}, ensure_ascii=False)
-        if pg:
-            conn.execute(
-                """
-                INSERT INTO public.document_chunks (document_id, chunk_index, content, embedding_model, metadata)
-                VALUES (?, ?, ?, 'local_bm25_hybrid', ?::jsonb)
-                """,
-                (doc_id, idx, chunk, chunk_meta),
-            )
-        else:
-            conn.execute(
-                """
-                INSERT INTO document_chunks (document_id, chunk_index, content, embedding_model, metadata)
-                VALUES (?, ?, ?, 'local_bm25_hybrid', ?)
-                """,
-                (doc_id, idx, chunk, chunk_meta),
-            )
-
-    write_activity_log(
-        conn,
-        actor_user_id=current_user.user_id,
-        action="upload_rag_document",
-        entity_type="company_document",
-        entity_id=str(doc_id),
-        after_obj={"title": payload.title.strip(), "file": safe_name, "chunks": len(chunks)},
-    )
-    conn.commit()
-    return {"status": "ok", "document_id": doc_id, "chunk_count": len(chunks)}
+    has_vec_expr = "(embedding IS NOT NULL)" if pg else "(embedding_json IS NOT NULL)"
+    rows = conn.execute(
+        f"""
+        SELECT chunk_id, document_id, chunk_index, content, embedding_model, embedding_dim,
+               {has_vec_expr} AS has_embedding, metadata, created_at
+        FROM document_chunks
+        WHERE document_id = ?
+        ORDER BY chunk_index ASC
+        """,
+        (doc_id,),
+    ).fetchall()
+    items = []
+    for r in rows:
+        item = dict(r)
+        item["has_embedding"] = bool(item.get("has_embedding"))
+        item["metadata"] = _parse_json_meta(item.get("metadata"))
+        items.append(item)
+    return {"document": dict(doc), "total": len(items), "items": items}
 
 
 @router.post("/rag/documents/{doc_id}/reindex")
@@ -551,26 +586,26 @@ def reindex_rag_document(
     current_user: AuthenticatedUser = Depends(require_permissions("rag.manage")),
     conn: sqlite3.Connection = Depends(get_db_dependency),
 ) -> Dict[str, Any]:
-    doc = conn.execute("SELECT * FROM company_documents WHERE document_id = ?", (doc_id,)).fetchone()
-    if not doc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy tài liệu RAG.")
+    try:
+        return reindex_rag_document_real(conn=conn, doc_id=doc_id, actor_user_id=current_user.user_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except RagDocumentProcessingError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except EmbeddingProviderError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    chunk_count = int(conn.execute("SELECT COUNT(*) FROM document_chunks WHERE document_id = ?", (doc_id,)).fetchone()[0])
-    conn.execute(
-        "UPDATE company_documents SET status = 'active', processed_at = ? WHERE document_id = ?",
-        (now_str, doc_id),
-    )
-    write_activity_log(
-        conn,
-        actor_user_id=current_user.user_id,
-        action="reindex_rag_document",
-        entity_type="company_document",
-        entity_id=str(doc_id),
-        after_obj={"title": doc["title"], "chunk_count": chunk_count, "processed_at": now_str},
-    )
-    conn.commit()
-    return {"status": "ok", "document_id": doc_id, "chunk_count": chunk_count, "processed_at": now_str}
+
+@router.post("/rag/documents/{doc_id}/archive")
+def archive_rag_document_endpoint(
+    doc_id: int,
+    current_user: AuthenticatedUser = Depends(require_permissions("rag.manage")),
+    conn: sqlite3.Connection = Depends(get_db_dependency),
+) -> Dict[str, Any]:
+    try:
+        return archive_rag_document(conn=conn, doc_id=doc_id, actor_user_id=current_user.user_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
 
 
 @router.delete("/rag/documents/{doc_id}")
@@ -593,6 +628,26 @@ def delete_rag_document(
     )
     conn.commit()
     return {"status": "ok", "deleted_document_id": doc_id}
+
+
+@router.post("/rag/search")
+def search_rag_knowledge_endpoint(
+    payload: RagSearchRequest,
+    current_user: AuthenticatedUser = Depends(
+        require_permissions("ai.ask.self", "ai.ask.department", "ai.ask.all", "ai.strategy")
+    ),
+    conn: sqlite3.Connection = Depends(get_db_dependency),
+) -> Dict[str, Any]:
+    """RBAC-scoped RAG retrieval endpoint (BM25 / Vector / Hybrid + Citations + Injection Defense)."""
+    return query_rag_knowledge(
+        conn=conn,
+        user=current_user,
+        question=payload.question,
+        mode=payload.mode,
+        top_k=payload.top_k,
+        as_of_date=payload.as_of_date,
+        document_type=payload.document_type,
+    )
 
 
 # =============================================================================

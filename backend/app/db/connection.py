@@ -40,6 +40,7 @@ _AUTO_PK_BY_TABLE: Dict[str, str] = {
     "permissions": "permission_id",
     "company_documents": "document_id",
     "document_chunks": "chunk_id",
+    "ai_messages": "message_id",
 }
 
 

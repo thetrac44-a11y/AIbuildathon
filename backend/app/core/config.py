@@ -33,6 +33,12 @@ class Settings(BaseModel):
     ai_query_timeout_seconds: int = 3
     ai_query_max_rows: int = 200
 
+    # Phase 3 LLM Provider settings (API keys are read dynamically from env, NEVER stored in DB)
+    llm_provider: str = os.getenv("LLM_PROVIDER", "gemini")
+    llm_model: str = os.getenv("LLM_MODEL", "gemini-2.5-flash")
+    llm_timeout_seconds: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "12.0"))
+    llm_max_retries: int = int(os.getenv("LLM_MAX_RETRIES", "2"))
+
     def validate_runtime_security(self) -> None:
         """Refuse insecure startup in production with default/short JWT secret."""
         if self.app_env.lower() == "production":
